@@ -1,0 +1,74 @@
+
+
+XAM Done:
+Remove hasflag (mandatory both in SAM and BAM)
+Remove isfilled() checks from all BAM operations.
+For BAM, all hasX should return a Bool
+Fix hasnextrefname
+RNAME should be able to be read even when read is unmapped (as per specs 1.4.3)
+
+XAM Todo:
+
+== Find out the dependencies
+
+=== Move tests to own files
+
+=== Change SAM interface to follow the BAM one
+
+=== Make display of SAM and BAM records identical
+	- Bam should display reference, not reference ID, also next_reference
+	- Sam should not display = in next_reference, but same name
+	- SAM and BAM's missing fields should not return "<missing>", but an actual missing
+	- Bam template length of 0 should return <missing>
+	- Bam should diplay mapping quality in Phred 33
+	- Auxiliary data should be displayed like sam
+
+=== Delete BAM.AuxData object
+	- Just make all methods rely on the Record directly
+
+=== Add dict-like interface for SAM and BAM records
+	- Move all dict-like function for bam to auxdata.jl
+	- get(record, key, default)
+	- delete!(record, key)
+	- setindex!(record, key)
+
+=== Add an interface for creating SAM and BAM headers more easily
+	- update_header(header, [segments])
+	- create_header(segments)
+
+
+
+	New interfaces:
+		S Implement get(BAM.Record, key, default)
+		S Implement pop!(record)
+		S Implement setindex!(record)
+		S Perhaps make an interface to add SQ headers from seq of records
+
+	Docs:
+		Update docs about how to write BAM files: Currently formatting errors, and doesn't mention header in example code
+
+	Bugfixes:
+		sam/metainfo/func MetaInfo should check that tag is two characters.
+		Also, no newline in comments. No checks in general for bad headers!
+		function record/isnextmapped(record::Record)::Bool: FLAG_MUNMAP should be SAM.FLAG_MUNMAP, has no tests
+
+	Optimizations:
+		Next_tag_position can be made slightly more efficient (lookup rather than branches) (small gains, too)
+
+	Misc changes
+		S The different functions checking BAM flags are inconsistently implemented. Redo them.
+		S SAM & BAM: hasflag(record) is redundant with isfilled(record)
+
+		metainfo/findkey and record/findkey and aux/findkey should return nothing rather than 0 when no key
+		BAM reader: Add check that the indices are not longer than number of refs
+
+ismapped() returns error on unfilled, else flag
+isprimary() same
+ispositivestrand same
+BUT isnextmapped returns false on unfilled
+
+hasrefid returns isfilled, not if it has ref id
+hasrefname same
+hasposition returns same BUT not hasrightposition
+BUT refname DOES check whether it has refname, meaning you can have hasrefname() true, yet error on refname()
+same dilemma with hasnextrefname/nextrefname
