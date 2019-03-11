@@ -28,9 +28,11 @@ mutable struct Record
         # An empty record is a legitimate BAM record.
         block_size = FIXED_FIELDS_BYTES - sizeof(Int32)
         flag_nc = UInt32(SAM.FLAG_UNMAP) << 16
-        # Unknown mapping quality is set to 0xff as per specs
-        bin_mq_nl = 0x0000ff00
-        return new(block_size, -1, -1, bin_mq_nl, flag_nc, 0, -1, -1, 0, UInt8[])
+        # Per specs, unknown MAPQ is 0xff, unknown length x01 (NULL terminator)
+        bin_mq_nl = 0x0000ff01
+        # Only the null terminator of the query name sequence
+        data = UInt8[0x00]
+        return new(block_size, -1, -1, bin_mq_nl, flag_nc, 0, -1, -1, 0, data)
     end
 end
 
@@ -68,30 +70,82 @@ function Base.copy(record::Record)
     return copy
 end
 
-function Base.show(io::IO, record::Record)
-    _refid = refid(record) === nothing ? "" : refid(record)
-    _position = position(record) === nothing ? "" : position(record)
-    _mappingquality = mappingquality(record) === nothing ? "" : mappingquality(record)
-    _nextrefid = nextrefid(record) === nothing ? "" : nextrefid(record)
-    _nextposition = nextposition(record) === nothing ? "" : nextposition(record)
+function quality_string(quals::Vector{UInt8})
+    characters = Vector{Char}(undef, length(quals))
+    for i in eachindex(quals)
+        @inbounds qual = quals[i]
+        if qual < 10
+            char = ' '
+        elseif qual < 15
+            char = '▁'
+        elseif qual < 20
+            char = '▂'
+        elseif qual < 25
+            char = '▃'
+        elseif qual < 30
+            char = '▄'
+        elseif qual < 35
+            char = '▆'
+        elseif qual < 40
+            char = '▇'
+        elseif qual < 255
+            char = '█'
+        else
+            char = '?'
+        end
+        @inbounds characters[i] = char
+    end
+    return join(characters)
+end
 
-    print(io, summary(record), ':')
-    println(io)
-    println(io, "      template name: ", tempname(record))
-    println(io, "               flag: ", flag(record))
-    println(io, "       reference ID: ", _refid)
-    println(io, "           position: ", _position)
-    println(io, "    mapping quality: ", _mappingquality)
-    println(io, "              CIGAR: ", cigar(record))
-    println(io, "  next reference ID: ", _nextrefid)
-    println(io, "      next position: ", _nextposition)
-    println(io, "    template length: ", templength(record))
-    println(io, "           sequence: ", sequence(record))
-    # TODO: pretty print base quality
-    println(io, "       base quality: ", quality(record))
-      print(io, "     auxiliary data:")
-    for field in keys(auxdata(record))
-        print(io, ' ', field, '=', record[field])
+function compact_string(sequence)
+    LEFT_PADDING = 21
+    width = displaysize()[2] - LEFT_PADDING
+    if length(sequence) <= width
+        return string(sequence)
+    else
+        half = div(width - 1, 2)
+        return string(sequence[1:half]) * '…' * string(sequence[end-half:end])
+    end
+end
+
+function Base.show(io::IO, record::Record)
+    println(io, summary(record), ':')
+    print(io,   "      template name: "); show(io, tempname(record))
+    print(io, "\n               flag: "); show(io, flag(record))
+    print(io, "\n       reference ID: "); show(io, refid(record))
+    print(io, "\n           position: "); show(io, position(record))
+    print(io, "\n    mapping quality: "); show(io, mappingquality(record))
+    print(io, "\n              CIGAR: "); show(io, cigar(record))
+    print(io, "\n  next reference ID: "); show(io, nextrefid(record))
+    print(io, "\n      next position: "); show(io, nextposition(record))
+    print(io, "\n    template length: "); show(io, templength(record))
+    # Sequence and base quality
+    LEFT_PADDING = 21
+    width = displaysize()[2] - LEFT_PADDING
+    seq = sequence(record)
+    if seq === nothing
+        print(io, "\n           sequence: "); show(io,  seq)
+        print(io, "\n       base quality: "); show(io, nothing)
+    elseif length(seq) <= width
+        print(io, "\n           sequence: "); show(io,  seq)
+        print(io, "\n       base quality: "); print(io, quality_string(quality(record)))
+    else
+        half = div(width, 2) - 1
+        print(io, "\n           sequence: ", seq[1:half], '…', seq[end-half:end])
+        qual = quality(record)
+        print(io, "\n       base quality: ", quality_string(qual[1:half]), '…',
+                  quality_string(qual[end-half:end]))
+    end
+    # Auxiliary fields - don't show if too long
+    print(io, "\n     auxiliary data:")
+    n_aux_bytes = data_size(record) - auxdata_position(record) + 1
+    if n_aux_bytes > 500
+        print(io, "<", n_aux_bytes, " bytes auxiliary data>")
+    else
+        for field in keys(auxdata(record))
+            print(io, ' ', field, '='); show(record[field])
+        end
     end
 end
 
@@ -110,21 +164,21 @@ function flag(record::Record)::UInt16
 end
 
 """
-    refid(record::Record)::Int
+    refid(record::Record)
 
 Get the reference sequence ID of `record`.
 
-The ID is 1-based (i.e. the first sequence is 1). Note that unmapped records can
-still have a reference.
+The ID is 1-based (i.e. the first sequence is 1). Returns `nothing` if not defined.
+Note that unmapped records can still have a reference.
 """
 # According to BAM specs, unmapped records CAN have reference and position
-function refid(record::Record)::Int
-    return Int(record.refid + 1)
+function refid(record::Record)::Union{Int,Nothing}
+    return record.refid == -1 ? nothing : Int(record.refid + 1)
 end
 
 # Return the length of the read name.
 function seqname_length(record::Record)::UInt8
-    return UInt8(record.bin_mq_nl & 0xff)
+    return UInt8(record.bin_mq_nl & 0xff) - 0x01
 end
 
 """
@@ -195,7 +249,7 @@ end
 Get the 1-based leftmost mapping position of the next/mate read of `record`.
 Returns `nothing` if the read is unmapped.
 """
-function nextposition(record::Record)
+function nextposition(record::Record)::Union{Int,Nothing}
     ispaired = flag(record) & SAM.FLAG_PAIRED == SAM.FLAG_PAIRED
     return ispaired ? Int(record.next_pos + 1) : nothing
 end
@@ -205,7 +259,7 @@ end
 
 Get the 1-based rightmost mapping position of `record`.
 """
-function rightposition(record::Record)::Int
+function rightposition(record::Record)::Union{Int,Nothing}
     pos = position(record)
     return pos === nothing ? nothing : pos + alignlength(record) - 1
 end
@@ -227,8 +281,13 @@ end
 
 Get the query template name of `record`.
 """
-function tempname(record::Record)::String
-    return unsafe_string(pointer(record.data), max(seqname_length(record) - 1, 0))
+function tempname(record::Record)::Union{String,Nothing}
+    seqlen = seqname_length(record)
+    if seqlen == 0
+        return nothing
+    else
+        return unsafe_string(pointer(record.data), seqlen)
+    end
 end
 
 """
@@ -243,10 +302,10 @@ end
 """
     templength(record::Record)::Int
 
-Get the template length of `record`.
+Get the template length of `record`. Returns `nothing` when unavailable.
 """
-function templength(record::Record)::Int
-    return Int(record.tlen)
+function templength(record::Record)::Union{Int,Nothing}
+    return record.tlen == 0 ? nothing : Int(record.tlen)
 end
 
 # ================= Boolean functions ===================
@@ -306,39 +365,39 @@ function hassequence(record::Record)
 end
 
 function hasrefid(record::Record)
-    return ismapped(record)
+    return record.refid > -1
 end
 
 function hasrefname(record::Record)
-    return ismapped(record)
+    return record.refid > -1
 end
 
 function hasposition(record::Record)
-    return ismapped(record)
+    return record.pos > -1
 end
 
 function hasrightposition(record::Record)
-    return ismapped(record)
+    return record.pos > -1
 end
 
 function hasmappingquality(record::Record)
-    return ismapped(record)
+    return mappingquality(x) !== nothing
 end
 
 function hasalignment(record::Record)
-    return ismapped(record)
+    return cigar_rle(record) !== nothing
 end
 
 function hasnextrefid(record::Record)
-    return isnextmapped(record)
+    return record.next_refid > -1
 end
 
 function hasnextrefname(record::Record)
-    return isnextmapped(record)
+    return record.next_refid > -1
 end
 
 function hasnextposition(record::Record)
-    return isnextmapped(record)
+    return record.next_pos > -1
 end
 
 function hastemplength(record::Record)
@@ -346,7 +405,9 @@ function hastemplength(record::Record)
 end
 
 function hasquality(record::Record)
-    return any(quality(record) .!= 0xff) # undefined quals are 0xff per specs
+    quals = quality(record)
+    # undefined quals are 0xff per specs
+    return quals !== nothing && any(i != 0xff for i in quality(record))
 end
 
 function hasauxdata(record::Record)
@@ -418,7 +479,9 @@ end
 
 function auxdata_position(record::Record)
     seqlen = seqlength(record)
-    return seqname_length(record) + n_cigar_op(record, false) * 4 + cld(seqlen, 2) + seqlen + 1
+    #        template_name        null_term     n_cigar_op      per_cigar_op    seq         qual
+    offset = seqname_length(record) + 1 + n_cigar_op(record, false) * 4 + cld(seqlen, 2) + seqlen
+    return offset + 1
 end
 
 
@@ -472,12 +535,17 @@ record, then you can set checkCG to `false`.
 
 See also `BAM.cigar_rle`.
 """
-function cigar(record::Record, checkCG::Bool = true)::String
-    buf = IOBuffer()
-    for (op, len) in zip(cigar_rle(record, checkCG)...)
-        print(buf, len, convert(Char, op))
+function cigar(record::Record, checkCG::Bool = true)::Union{String,Nothing}
+    rle = cigar_rle(record, checkCG)
+    if rle === nothing
+        return nothing
+    else
+        buf = IOBuffer()
+        for (op, len) in zip(rle...)
+            print(buf, len, convert(Char, op))
+        end
+        return String(take!(buf))
     end
-    return String(take!(buf))
 end
 
 """
@@ -502,10 +570,14 @@ record, then you can set checkCG to `false`.
 
 See also `BAM.cigar`.
 """
-function cigar_rle(record::Record, checkCG::Bool = true)::Tuple{Vector{BioAlignments.Operation},Vector{Int}}
+function cigar_rle(record::Record, checkCG::Bool = true)::Union{Tuple{Vector{BioAlignments.Operation},Vector{Int}},Nothing}
     idx, nops = cigar_position(record, checkCG)
-    ops, lens = extract_cigar_rle(record.data, idx, nops)
-    return ops, lens
+    if nops == 0
+        return nothing
+    else
+        ops, lens = extract_cigar_rle(record.data, idx, nops)
+        return ops, lens
+    end
 end
 
 function extract_cigar_rle(data::Vector{UInt8}, offset, n)
@@ -521,7 +593,7 @@ function extract_cigar_rle(data::Vector{UInt8}, offset, n)
 end
 
 function cigar_position(record::Record, checkCG::Bool = true)::Tuple{Int, Int}
-    cigaridx, nops = seqname_length(record) + 1, record.flag_nc & 0xFFFF
+    cigaridx, nops = seqname_length(record) + 2, record.flag_nc & 0xFFFF
     if !checkCG
         return cigaridx, nops
     end
@@ -584,7 +656,7 @@ end
 Get the alignment length of `record`.
 """
 function alignlength(record::Record)::Int
-    offset = seqname_length(record)
+    offset = seqname_length(record) + 1
     length::Int = 0
     for i in offset + 1:4:offset + n_cigar_op(record, false) * 4
         x = unsafe_load(Ptr{UInt32}(pointer(record.data, i)))
@@ -599,29 +671,37 @@ end
 """
     sequence(record::Record)::BioSequences.DNASequence
 
-Get the segment sequence of `record`.
+Get the segment sequence of `record`. Returns `nothing` if not available.
 """
-function sequence(record::Record)::BioSequences.DNASequence
+function sequence(record::Record)::Union{BioSequences.DNASequence, Nothing}
     seqlen = seqlength(record)
-    data = Vector{UInt64}(undef, cld(seqlen, 16))
-    src::Ptr{UInt64} = pointer(record.data, seqname_length(record) + n_cigar_op(record, false) * 4 + 1)
-    for i in 1:lastindex(data)
-        # copy data flipping high and low nybble
-        x = unsafe_load(src, i)
-        data[i] = (x & 0x0f0f0f0f0f0f0f0f) << 4 | (x & 0xf0f0f0f0f0f0f0f0) >> 4
+    if seqlen == 0
+        return nothing
+    else
+        data = Vector{UInt64}(undef, cld(seqlen, 16))
+        src::Ptr{UInt64} = pointer(record.data, seqname_length(record) + n_cigar_op(record, false) * 4 + 2)
+        for i in 1:lastindex(data)
+            # copy data flipping high and low nybble
+            x = unsafe_load(src, i)
+            data[i] = (x & 0x0f0f0f0f0f0f0f0f) << 4 | (x & 0xf0f0f0f0f0f0f0f0) >> 4
+        end
+        return BioSequences.DNASequence(data, 1:seqlen, false)
     end
-    return BioSequences.DNASequence(data, 1:seqlen, false)
 end
 
 """
     quality(record::Record)::Vector{UInt8}
 
-Get the base quality of  `record`.
+Get the base quality of `record`, or `nothing` if not available.
 """
-function quality(record::Record)::Vector{UInt8}
+function quality(record::Record)::Union{Vector{UInt8}, Nothing}
     seqlen = seqlength(record)
-    offset = seqname_length(record) + n_cigar_op(record, false) * 4 + cld(seqlen, 2)
-    return [reinterpret(UInt8, record.data[i+offset]) for i in 1:seqlen]
+    if seqlen == 0
+        return nothing
+    else
+        offset = seqname_length(record) + 1 + n_cigar_op(record, false) * 4 + cld(seqlen, 2)
+        return [reinterpret(UInt8, record.data[i+offset]) for i in 1:seqlen]
+    end
 end
 
 """

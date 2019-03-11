@@ -1,2 +1,2 @@
 # XAM.jl
-SAM and BAM parsing in Julia
+Processing of SAM and BAM files in Julia. Forked from BioAlignments.jl. Under development, not functional yet.
