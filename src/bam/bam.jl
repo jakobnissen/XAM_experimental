@@ -10,9 +10,9 @@ import BioSequences
 import BioCore: BioCore, isfilled
 
 include("bai.jl")
-include("auxdata.jl")
 include("reader.jl")
 include("record.jl")
+include("auxdata.jl")
 include("writer.jl")
 include("overlap.jl")
 

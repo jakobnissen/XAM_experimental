@@ -22,18 +22,33 @@ mutable struct Record
     tlen::Int32
     # variable length data
     data::Vector{UInt8}
-    reader::Reader
+    reader::Union{Reader, Nothing}
 
     function Record()
         # An empty record is a legitimate BAM record.
-        block_size = FIXED_FIELDS_BYTES - sizeof(Int32)
+        block_size = FIXED_FIELDS_BYTES - sizeof(Int32) + 1
         flag_nc = UInt32(SAM.FLAG_UNMAP) << 16
         # Per specs, unknown MAPQ is 0xff, unknown length x01 (NULL terminator)
         bin_mq_nl = 0x0000ff01
         # Only the null terminator of the query name sequence
         data = UInt8[0x00]
-        return new(block_size, -1, -1, bin_mq_nl, flag_nc, 0, -1, -1, 0, data)
+        return new(block_size, -1, -1, bin_mq_nl, flag_nc, 0, -1, -1, 0, data, nothing)
     end
+end
+
+function Base.empty!(record::Record)
+    record.block_size = FIXED_FIELDS_BYTES - sizeof(Int32) + 1
+    record.refid      = -1
+    record.pos        = -1
+    record.bin_mq_nl  = 0x0000ff01
+    record.flag_nc    = UInt32(SAM.FLAG_UNMAP) << 16
+    record.l_seq      = 0
+    record.next_refid = -1
+    record.next_pos   = -1
+    record.tlen       = 0
+    record.data[1]    = 0x00
+    record.reader     = nothing
+    return record
 end
 
 function Record(data::Vector{UInt8})
@@ -46,8 +61,8 @@ function Base.convert(::Type{Record}, data::Vector{UInt8})
     dst_pointer = Ptr{UInt8}(pointer_from_objref(record))
     unsafe_copyto!(dst_pointer, pointer(data), FIXED_FIELDS_BYTES)
     dsize = data_size(record)
-    resize!(record.data, dsize)
     length(data) < dsize + FIXED_FIELDS_BYTES && throw(ArgumentError("data too short"))
+    resize!(record.data, dsize)
     unsafe_copyto!(record.data, 1, data, FIXED_FIELDS_BYTES + 1, dsize)
     return record
 end
@@ -64,9 +79,7 @@ function Base.copy(record::Record)
     copy.next_pos   = record.next_pos
     copy.tlen       = record.tlen
     copy.data       = record.data[1:data_size(record)]
-    if isdefined(record, :reader)
-        copy.reader = record.reader
-    end
+    copy.reader     = record.reader
     return copy
 end
 
@@ -176,7 +189,7 @@ function refid(record::Record)::Union{Int,Nothing}
     return record.refid == -1 ? nothing : Int(record.refid + 1)
 end
 
-# Return the length of the read name.
+# Return the length of the read name. NOT including the null byte terminator
 function seqname_length(record::Record)::UInt8
     return UInt8(record.bin_mq_nl & 0xff) - 0x01
 end
@@ -191,7 +204,10 @@ record. Note that unmapped records can still have a reference.
 """
 function nextrefid(record::Record)::Union{Int,Nothing}
     ispaired = flag(record) & SAM.FLAG_PAIRED == SAM.FLAG_PAIRED
-    return ispaired ? Int(record.next_refid + 1) : nothing
+    if !ispaired || record.next_refid == -1
+        return nothing
+    end
+    return  Int(record.next_refid + 1)
 end
 
 """
@@ -201,9 +217,11 @@ Get the reference sequence name of `record`.
 
 See also: `BAM.refid`.
 """
-function refname(record::Record)::String
+function refname(record::Record)::Union{String,Nothing}
     id = refid(record)
-    check_refid(id)
+    if id === nothing || record.reader === nothing
+        return nothing
+    end
     return record.reader.refseqnames[id]
 end
 
@@ -214,10 +232,11 @@ Get the reference name of the mate/next read of `record`.
 
 See also: `BAM.nextrefid`
 """
-function nextrefname(record::Record)::String
-    check_paired(record)
+function nextrefname(record::Record)::Union{String,Nothing}
     id = nextrefid(record)
-    check_refid(id)
+    if id === nothing || record.reader === nothing
+        return nothing
+    end
     return record.reader.refseqnames[id]
 end
 
@@ -227,9 +246,11 @@ end
 Get the length of the reference sequence this record applies to. Note that
 unmapped records can still have a reference.
 """
-function reflen(record::Record)::Int
+function reflen(record::Record)::Union{Int,Nothing}
     id = refid(record)
-    check_refid(id)
+    if id === nothing || record.reader === nothing
+        return nothing
+    end
     return record.reader.refseqlens[id]
 end
 
@@ -251,7 +272,10 @@ Returns `nothing` if the read is unmapped.
 """
 function nextposition(record::Record)::Union{Int,Nothing}
     ispaired = flag(record) & SAM.FLAG_PAIRED == SAM.FLAG_PAIRED
-    return ispaired ? Int(record.next_pos + 1) : nothing
+    if !ispaired || record.next_pos == -1
+        return nothing
+    end
+    return Int(record.next_pos + 1)
 end
 
 """
@@ -283,11 +307,7 @@ Get the query template name of `record`.
 """
 function tempname(record::Record)::Union{String,Nothing}
     seqlen = seqname_length(record)
-    if seqlen == 0
-        return nothing
-    else
-        return unsafe_string(pointer(record.data), seqlen)
-    end
+    return seqlen == 0 ? nothing : unsafe_string(pointer(record.data), seqlen)
 end
 
 """
@@ -300,7 +320,7 @@ function seqlength(record::Record)::Int
 end
 
 """
-    templength(record::Record)::Int
+    templength(record::Record)
 
 Get the template length of `record`. Returns `nothing` when unavailable.
 """
@@ -453,24 +473,6 @@ function BioCore.hasrightposition(record::Record)
 end
 
 # =============== Helper functions ============================
-
-function check_refid(refid)
-    if refid < 1
-        throw(ArgumentError("Invalid refid"))
-    end
-end
-
-function check_paired(record)
-    if flag(record) & SAM.FLAG_PAIRED == 0
-        throw(ArgumentError("Unpaired record"))
-    end
-end
-
-function check_mapped(record)
-    if !ismapped(record)
-        throw(ArgumentError("Record is not mapped"))
-    end
-end
 
 # Return the size of the `.data` field.
 function data_size(record::Record)
@@ -702,35 +704,4 @@ function quality(record::Record)::Union{Vector{UInt8}, Nothing}
         offset = seqname_length(record) + 1 + n_cigar_op(record, false) * 4 + cld(seqlen, 2)
         return [reinterpret(UInt8, record.data[i+offset]) for i in 1:seqlen]
     end
-end
-
-"""
-    auxdata(record::Record)::BAM.AuxData
-
-Get the auxiliary data of `record`.
-"""
-function auxdata(record::Record)
-    return AuxData(record.data[auxdata_position(record):data_size(record)])
-end
-
-function Base.getindex(record::Record, tag::AbstractString)
-    checkauxtag(tag)
-    start = auxdata_position(record)
-    stop = data_size(record)
-    return getauxvalue(record.data, start, stop, UInt8(tag[1]), UInt8(tag[2]))
-end
-
-function Base.haskey(record::Record, tag::AbstractString)
-    checkauxtag(tag)
-    start = auxdata_position(record)
-    stop = data_size(record)
-    return findauxtag(record.data, start, stop, UInt8(tag[1]), UInt8(tag[2])) > 0
-end
-
-function Base.keys(record::Record)
-    return collect(keys(auxdata(record)))
-end
-
-function Base.values(record::Record)
-    return [record[key] for key in keys(record)]
 end
