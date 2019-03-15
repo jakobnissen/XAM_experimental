@@ -7,7 +7,7 @@ struct AuxDataIterator
     data::Vector{UInt8}
 end
 
-function AuxDataIterator(record::Record)
+function AuxDataIterator(record::BAMRecord)
     return AuxDataIterator(auxdata_position(record), data_size(record), record.data)
 end
 
@@ -27,11 +27,11 @@ function Base.iterate(aux::AuxDataIterator, pos=aux.start::Int)
     return Pair{String,Any}(String([t1, t2]), value), pos
 end
 
-function auxdata(record::Record)::Dict{String,Any}
+function auxdata(record::BAMRecord)::Dict{String,Any}
     return Dict{String,Any}(AuxDataIterator(record))
 end
 
-function Base.getindex(record::Record, tag::AbstractString)
+function Base.getindex(record::BAMRecord, tag::AbstractString)
     pos = findauxtag(record, tag)
     if pos === nothing
         throw(KeyError(tag))
@@ -39,7 +39,7 @@ function Base.getindex(record::Record, tag::AbstractString)
     return loadauxvalue(record.data, pos)
 end
 
-function Base.get(record::Record, tag::AbstractString, default::Any)
+function Base.get(record::BAMRecord, tag::AbstractString, default::Any)
     pos = findauxtag(record, tag)
     if pos === nothing
         return default
@@ -47,11 +47,11 @@ function Base.get(record::Record, tag::AbstractString, default::Any)
     return loadauxvalue(record.data, pos)
 end
 
-function Base.haskey(record::Record, tag::AbstractString)::Bool
+function Base.haskey(record::BAMRecord, tag::AbstractString)::Bool
     return findauxtag(record, tag) !== nothing
 end
 
-function Base.pop!(record::Record, tag::AbstractString)
+function Base.pop!(record::BAMRecord, tag::AbstractString)
     pos = findauxtag(record, tag)
     if pos === nothing
         throw(KeyError(tag))
@@ -59,12 +59,12 @@ function Base.pop!(record::Record, tag::AbstractString)
     return pop_pos!(record, pos)
 end
 
-function Base.pop!(record::Record, tag::AbstractString, default)
+function Base.pop!(record::BAMRecord, tag::AbstractString, default)
     pos = findauxtag(record, tag)
     return pos === nothing ? default : pop_pos!(record, pos)
 end
 
-function Base.delete!(record::Record, tag::AbstractString)
+function Base.delete!(record::BAMRecord, tag::AbstractString)
     pos = findauxtag(record, tag)
     if pos === nothing
         throw(KeyError(tag))
@@ -82,7 +82,7 @@ const TYPESTRINGS = Dict{DataType,String}(UInt8=>"C", Vector{UInt8}=>"BC",
                        Float32=>"f", Vector{Float32}=>"Bf",
                        String=>"Z")
 
-function Base.setindex!(record::Record, value, key::AbstractString)
+function Base.setindex!(record::BAMRecord, value, key::AbstractString)
     data = record.data
     tag = get(TYPESTRINGS, typeof(value), nothing)
     if tag === nothing
@@ -130,7 +130,7 @@ end
 
 # Internals
 # ---------
-function findauxtag(record::Record, tag::AbstractString)
+function findauxtag(record::BAMRecord, tag::AbstractString)
     if sizeof(tag) != 2
         throw(ArgumentError("tag length must be 2"))
     end
@@ -244,7 +244,7 @@ function next_tag_position(data::Vector{UInt8}, p::Int)::Int
 end
 
 # Remove the tag from position. Unsafe (must be present.)
-function pop_pos!(record::Record, pos::Int)
+function pop_pos!(record::BAMRecord, pos::Int)
     val = loadauxvalue(record.data, pos)
     nextpos = next_tag_position(record.data, pos)
     datasize = data_size(record)

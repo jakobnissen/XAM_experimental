@@ -12,7 +12,7 @@ function Base.IteratorSize(::Type{OverlapIterator{T}}) where T
 end
 
 function Base.eltype(::Type{OverlapIterator{T}}) where T
-    return Record
+    return BAMRecord
 end
 
 function GenomicFeatures.eachoverlap(reader::Reader, interval::Interval)
@@ -42,7 +42,7 @@ mutable struct OverlapIteratorState
     chunkid::Int
 
     # pre-allocated record
-    record::Record
+    record::BAMRecord
 end
 
 function Base.iterate(iter::OverlapIterator)
@@ -55,7 +55,7 @@ function Base.iterate(iter::OverlapIterator)
     if !isempty(chunks)
         seek(iter.reader, first(chunks).start)
     end
-    state = OverlapIteratorState(refindex, chunks, 1, Record())
+    state = OverlapIteratorState(refindex, chunks, 1, BAMRecord())
     return iterate(iter, state)
 end
 
@@ -80,7 +80,7 @@ function Base.iterate(iter::OverlapIterator, state)
     return nothing
 end
 
-function compare_intervals(record::Record, interval::Tuple{Int,UnitRange{Int}})
+function compare_intervals(record::BAMRecord, interval::Tuple{Int,UnitRange{Int}})
     rid = refid(record)
     if rid < interval[1] || (rid == interval[1] && rightposition(record) < first(interval[2]))
         # strictly left

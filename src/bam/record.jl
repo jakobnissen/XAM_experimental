@@ -5,17 +5,20 @@
 const FIXED_FIELDS_BYTES = 36
 
 """
-    BAM.Record()
+    BAM.BAMRecord()
 
 Create an unfilled BAM record.
 """
-mutable struct Record
+mutable struct BAMRecord
     # fixed-length fields (see BAM specs for the details)
     block_size::Int32
     refid::Int32
     pos::Int32
-    bin_mq_nl::UInt32
-    flag_nc::UInt32
+    l_read_name::UInt8
+    mapq::UInt8
+    bin::UInt16
+    n_cigar_op::UInt16
+    flag::UInt16
     l_seq::Int32
     next_refid::Int32
     next_pos::Int32
@@ -24,40 +27,22 @@ mutable struct Record
     data::Vector{UInt8}
     reader::Union{Reader, Nothing}
 
-    function Record()
+    function BAMRecord()
         # An empty record is a legitimate BAM record.
         block_size = FIXED_FIELDS_BYTES - sizeof(Int32) + 1
-        flag_nc = UInt32(SAM.FLAG_UNMAP) << 16
-        # Per specs, unknown MAPQ is 0xff, unknown length x01 (NULL terminator)
-        bin_mq_nl = 0x0000ff01
         # Only the null terminator of the query name sequence
         data = UInt8[0x00]
-        return new(block_size, -1, -1, bin_mq_nl, flag_nc, 0, -1, -1, 0, data, nothing)
+        return new(block_size, -1, -1, 0x01, 0xff, 0, 0, 0x004, 0, -1, -1, 0, data, nothing)
     end
 end
 
-function Base.empty!(record::Record)
-    record.block_size = FIXED_FIELDS_BYTES - sizeof(Int32) + 1
-    record.refid      = -1
-    record.pos        = -1
-    record.bin_mq_nl  = 0x0000ff01
-    record.flag_nc    = UInt32(SAM.FLAG_UNMAP) << 16
-    record.l_seq      = 0
-    record.next_refid = -1
-    record.next_pos   = -1
-    record.tlen       = 0
-    record.data[1]    = 0x00
-    record.reader     = nothing
-    return record
+function BAMRecord(data::Vector{UInt8})
+    return convert(BAMRecord, data)
 end
 
-function Record(data::Vector{UInt8})
-    return convert(Record, data)
-end
-
-function Base.convert(::Type{Record}, data::Vector{UInt8})
+function Base.convert(::Type{BAMRecord}, data::Vector{UInt8})
     length(data) < FIXED_FIELDS_BYTES && throw(ArgumentError("data too short"))
-    record = Record()
+    record = BAMRecord()
     dst_pointer = Ptr{UInt8}(pointer_from_objref(record))
     unsafe_copyto!(dst_pointer, pointer(data), FIXED_FIELDS_BYTES)
     dsize = data_size(record)
@@ -67,17 +52,11 @@ function Base.convert(::Type{Record}, data::Vector{UInt8})
     return record
 end
 
-function Base.copy(record::Record)
-    copy = Record()
-    copy.block_size = record.block_size
-    copy.refid      = record.refid
-    copy.pos        = record.pos
-    copy.bin_mq_nl  = record.bin_mq_nl
-    copy.flag_nc    = record.flag_nc
-    copy.l_seq      = record.l_seq
-    copy.next_refid = record.next_refid
-    copy.next_pos   = record.next_pos
-    copy.tlen       = record.tlen
+function Base.copy(record::BAMRecord)
+    copy = BAMRecord()
+    dst_pointer = Ptr{UInt8}(pointer_from_objref(copy))
+    src_pointer = Ptr{UInt8}(pointer_from_objref(record))
+    unsafe_copyto!(dst_pointer, src_pointer, FIXED_FIELDS_BYTES)
     copy.data       = record.data[1:data_size(record)]
     copy.reader     = record.reader
     return copy
@@ -122,7 +101,7 @@ function compact_string(sequence)
     end
 end
 
-function Base.show(io::IO, record::Record)
+function Base.show(io::IO, record::BAMRecord)
     println(io, summary(record), ':')
     print(io,   "      template name: "); show(io, tempname(record))
     print(io, "\n               flag: "); show(io, flag(record))
@@ -137,9 +116,9 @@ function Base.show(io::IO, record::Record)
     LEFT_PADDING = 21
     width = displaysize()[2] - LEFT_PADDING
     seq = sequence(record)
-    if seq === nothing
+    if seq === missing
         print(io, "\n           sequence: "); show(io,  seq)
-        print(io, "\n       base quality: "); show(io, nothing)
+        print(io, "\n       base quality: "); show(io, missing)
     elseif length(seq) <= width
         print(io, "\n           sequence: "); show(io,  seq)
         print(io, "\n       base quality: "); print(io, quality_string(quality(record)))
@@ -162,324 +141,323 @@ function Base.show(io::IO, record::Record)
     end
 end
 
-function Base.read!(reader::Reader, record::Record)
+function Base.read!(reader::Reader, record::BAMRecord)
     return _read!(reader, record)
 end
 
 # ============== Accessor functions =====================
 """
-    flag(record::Record)::UInt16
+    flag(record::BAMRecord)::UInt16
 
 Get the bitwise flag of `record`.
 """
-function flag(record::Record)::UInt16
-    return UInt16(record.flag_nc >> 16)
+function flag(record::BAMRecord)::UInt16
+    return record.flag
 end
 
 """
-    refid(record::Record)
+    refid(record::BAMRecord)
 
 Get the reference sequence ID of `record`.
 
-The ID is 1-based (i.e. the first sequence is 1). Returns `nothing` if not defined.
+The ID is 1-based (i.e. the first sequence is 1). Returns `missing` if not defined.
 Note that unmapped records can still have a reference.
 """
 # According to BAM specs, unmapped records CAN have reference and position
-function refid(record::Record)::Union{Int,Nothing}
-    return record.refid == -1 ? nothing : Int(record.refid + 1)
+function refid(record::BAMRecord)::Union{Int,Missing}
+    return record.refid == -1 ? missing : Int(record.refid + 1)
 end
 
 # Return the length of the read name. NOT including the null byte terminator
-function seqname_length(record::Record)::UInt8
-    return UInt8(record.bin_mq_nl & 0xff) - 0x01
+function seqname_length(record::BAMRecord)::UInt8
+    return record.l_read_name - 0x01
 end
 
 """
-    nextrefid(record::Record)
+    nextrefid(record::BAMRecord)
 
 Get the next/mate reference sequence ID of `record`.
 
-The ID is 1-based (i.e. the first sequence is 1) and is `nothing` for an unpaired
+The ID is 1-based (i.e. the first sequence is 1) and is `missing` for an unpaired
 record. Note that unmapped records can still have a reference.
 """
-function nextrefid(record::Record)::Union{Int,Nothing}
+function nextrefid(record::BAMRecord)::Union{Int,Missing}
     ispaired = flag(record) & SAM.FLAG_PAIRED == SAM.FLAG_PAIRED
     if !ispaired || record.next_refid == -1
-        return nothing
+        return missing
     end
     return  Int(record.next_refid + 1)
 end
 
 """
-    refname(record::Record)::String
+    refname(record::BAMRecord)::String
 
 Get the reference sequence name of `record`.
 
 See also: `BAM.refid`.
 """
-function refname(record::Record)::Union{String,Nothing}
+function refname(record::BAMRecord)::Union{String,Missing}
     id = refid(record)
-    if id === nothing || record.reader === nothing
-        return nothing
+    if id === missing || record.reader === nothing
+        return missing
     end
     return record.reader.refseqnames[id]
 end
 
 """
-    nextrefname(record::Record)::String
+    nextrefname(record::BAMRecord)::String
 
 Get the reference name of the mate/next read of `record`.
 
 See also: `BAM.nextrefid`
 """
-function nextrefname(record::Record)::Union{String,Nothing}
+function nextrefname(record::BAMRecord)::Union{String,Missing}
     id = nextrefid(record)
-    if id === nothing || record.reader === nothing
-        return nothing
+    if id === missing || record.reader === nothing
+        return missing
     end
     return record.reader.refseqnames[id]
 end
 
 """
-    reflen(record::Record)::Int
+    reflen(record::BAMRecord)::Int
 
 Get the length of the reference sequence this record applies to. Note that
 unmapped records can still have a reference.
 """
-function reflen(record::Record)::Union{Int,Nothing}
+function reflen(record::BAMRecord)::Union{Int,Missing}
     id = refid(record)
-    if id === nothing || record.reader === nothing
-        return nothing
+    if id === missing || record.reader === nothing
+        return missing
     end
     return record.reader.refseqlens[id]
 end
 
 """
-    position(record::Record)
+    position(record::BAMRecord)
 
 Get the 1-based leftmost mapping position of `record`. Note that unmapped records
 can still have a reference position.
 """
-function position(record::Record)::Union{Int,Nothing}
-    return record.pos == -1 ? nothing : Int(record.pos + 1)
+function position(record::BAMRecord)::Union{Int,Missing}
+    return record.pos == -1 ? missing : Int(record.pos + 1)
 end
 
 """
-    nextposition(record::Record)::Int
+    nextposition(record::BAMRecord)::Int
 
 Get the 1-based leftmost mapping position of the next/mate read of `record`.
-Returns `nothing` if the read is unmapped.
+Returns `missing` if the read is unmapped.
 """
-function nextposition(record::Record)::Union{Int,Nothing}
+function nextposition(record::BAMRecord)::Union{Int,Missing}
     ispaired = flag(record) & SAM.FLAG_PAIRED == SAM.FLAG_PAIRED
     if !ispaired || record.next_pos == -1
-        return nothing
+        return missing
     end
     return Int(record.next_pos + 1)
 end
 
 """
-    rightposition(record::Record)::Int
+    rightposition(record::BAMRecord)::Int
 
 Get the 1-based rightmost mapping position of `record`.
 """
-function rightposition(record::Record)::Union{Int,Nothing}
+function rightposition(record::BAMRecord)::Union{Int,Missing}
     pos = position(record)
-    return pos === nothing ? nothing : pos + alignlength(record) - 1
+    return pos === missing ? missing : pos + alignlength(record) - 1
 end
 
 """
-    mappingquality(record::Record)::UInt8
+    mappingquality(record::BAMRecord)::UInt8
 
-Get the mapping quality of `record`. Returns nothing if the MAPQ field is set to
+Get the mapping quality of `record`. Returns missing if the MAPQ field is set to
 0xff, indicating unknown value.
 """
-function mappingquality(record::Record)::Union{UInt8,Nothing}
+function mappingquality(record::BAMRecord)::Union{UInt8,Missing}
     # Mapping qual of 0xff means unknown as per BAM specs
-    as_uint8 = UInt8((record.bin_mq_nl >> 8) & 0xff)
-    return as_uint8 == 0xff ? nothing : as_uint8
+    return record.mapq == 0xff ? missing : record.mapq
 end
 
 """
-    tempname(record::Record)::String
+    tempname(record::BAMRecord)::String
 
-Get the query template name of `record`.
+Get the query template name of `record`. Returns `missing` if unavailable.
 """
-function tempname(record::Record)::Union{String,Nothing}
+function tempname(record::BAMRecord)::Union{String,Missing}
     seqlen = seqname_length(record)
-    return seqlen == 0 ? nothing : unsafe_string(pointer(record.data), seqlen)
+    return seqlen == 0 ? missing : unsafe_string(pointer(record.data), seqlen)
 end
 
 """
-    seqlength(record::Record)::Int
+    seqlength(record::BAMRecord)::Int
 
 Get the sequence length of `record`.
 """
-function seqlength(record::Record)::Int
+function seqlength(record::BAMRecord)::Int
     return Int(record.l_seq)
 end
 
 """
-    templength(record::Record)
+    templength(record::BAMRecord)
 
-Get the template length of `record`. Returns `nothing` when unavailable.
+Get the template length of `record`. Returns `missing` when unavailable.
 """
-function templength(record::Record)::Union{Int,Nothing}
-    return record.tlen == 0 ? nothing : Int(record.tlen)
+function templength(record::BAMRecord)::Union{Int,Missing}
+    return record.tlen == 0 ? missing : Int(record.tlen)
 end
 
 # ================= Boolean functions ===================
 """
-    ismapped(record::Record)::Bool
+    ismapped(record::BAMRecord)::Bool
 
 Test if `record` is mapped.
 """
-function ismapped(record::Record)::Bool
+function ismapped(record::BAMRecord)::Bool
     return flag(record) & SAM.FLAG_UNMAP == 0
 end
 
 """
-    isprimary(record::Record)::Bool
+    isprimary(record::BAMRecord)::Bool
 
 Test if `record` is a primary line of the read.
 
 This is equivalent to `flag(record) & 0x900 == 0`.
 """
-function isprimary(record::Record)::Bool
+function isprimary(record::BAMRecord)::Bool
     return flag(record) & (SAM.FLAG_SECONDARY | SAM.FLAG_SUPPLEMENTARY) == 0
 end
 
 """
-    ispositivestrand(record::Record)::Bool
+    ispositivestrand(record::BAMRecord)::Bool
 
 Test if `record` is aligned to the positive strand.
 
 This is equivalent to `flag(record) & 0x10 == 0`.
 """
-function ispositivestrand(record::Record)::Bool
+function ispositivestrand(record::BAMRecord)::Bool
     return flag(record) & SAM.FLAG_REVERSE == 0
 end
 
 """
-    isnextmapped(record::Record)::Bool
+    isnextmapped(record::BAMRecord)::Bool
 
 Test if the mate/next read of `record` is mapped.
 """
-function isnextmapped(record::Record)::Bool
+function isnextmapped(record::BAMRecord)::Bool
     return flag(record) & (SAM.FLAG_MUNMAP | SAM.FLAG_PAIRED) == 1
 end
 
 # ==============   SAM-compatibility functions ==========
-function hastempname(record::Record)
+function hastempname(record::BAMRecord)
     return seqname_length(record) > 0
 end
 
 # TODO: Update this - do we need it? What does the SAM equivalent do?
 # Review this once I've rewritten SAM
-function hasseqlength(record::Record)
+function hasseqlength(record::BAMRecord)
     return true
 end
 
-function hassequence(record::Record)
+function hassequence(record::BAMRecord)
     return seqlength(record) > 0
 end
 
-function hasrefid(record::Record)
+function hasrefid(record::BAMRecord)
     return record.refid > -1
 end
 
-function hasrefname(record::Record)
+function hasrefname(record::BAMRecord)
     return record.refid > -1
 end
 
-function hasposition(record::Record)
+function hasposition(record::BAMRecord)
     return record.pos > -1
 end
 
-function hasrightposition(record::Record)
+function hasrightposition(record::BAMRecord)
     return record.pos > -1
 end
 
-function hasmappingquality(record::Record)
-    return mappingquality(x) !== nothing
+function hasmappingquality(record::BAMRecord)
+    return mappingquality(x) !== missing
 end
 
-function hasalignment(record::Record)
-    return cigar_rle(record) !== nothing
+function hasalignment(record::BAMRecord)
+    return cigar_rle(record) !== missing
 end
 
-function hasnextrefid(record::Record)
+function hasnextrefid(record::BAMRecord)
     return record.next_refid > -1
 end
 
-function hasnextrefname(record::Record)
+function hasnextrefname(record::BAMRecord)
     return record.next_refid > -1
 end
 
-function hasnextposition(record::Record)
+function hasnextposition(record::BAMRecord)
     return record.next_pos > -1
 end
 
-function hastemplength(record::Record)
+function hastemplength(record::BAMRecord)
     return record.tlen != 0
 end
 
-function hasquality(record::Record)
+function hasquality(record::BAMRecord)
     quals = quality(record)
     # undefined quals are 0xff per specs
-    return quals !== nothing && any(i != 0xff for i in quality(record))
+    return quals !== missing && any(i != 0xff for i in quality(record))
 end
 
-function hasauxdata(record::Record)
+function hasauxdata(record::BAMRecord)
     return auxdata_position(record) < data_size(record)
 end
 
 # ================= BioCore functions =========================
 
-function BioCore.isfilled(record::Record)
+function BioCore.isfilled(record::BAMRecord)
     return true
 end
 
-function BioCore.seqname(record::Record)
+function BioCore.seqname(record::BAMRecord)
     return tempname(record)
 end
 
-function BioCore.hasseqname(record::Record)
+function BioCore.hasseqname(record::BAMRecord)
     return hastempname(record)
 end
 
-function BioCore.sequence(record::Record)
+function BioCore.sequence(record::BAMRecord)
     return sequence(record)
 end
 
-function BioCore.hassequence(record::Record)
+function BioCore.hassequence(record::BAMRecord)
     return hassequence(record)
 end
 
-function BioCore.leftposition(record::Record)
+function BioCore.leftposition(record::BAMRecord)
     return position(record)
 end
 
-function BioCore.hasleftposition(record::Record)
+function BioCore.hasleftposition(record::BAMRecord)
     return hasposition(record)
 end
 
-function BioCore.rightposition(record::Record)
+function BioCore.rightposition(record::BAMRecord)
     return rightposition(record)
 end
 
-function BioCore.hasrightposition(record::Record)
+function BioCore.hasrightposition(record::BAMRecord)
     return hasrightposition(record)
 end
 
 # =============== Helper functions ============================
 
 # Return the size of the `.data` field.
-function data_size(record::Record)
+function data_size(record::BAMRecord)
     return record.block_size - FIXED_FIELDS_BYTES + sizeof(record.block_size)
 end
 
-function auxdata_position(record::Record)
+function auxdata_position(record::BAMRecord)
     seqlen = seqlength(record)
     #        template_name        null_term     n_cigar_op      per_cigar_op    seq         qual
     offset = seqname_length(record) + 1 + n_cigar_op(record, false) * 4 + cld(seqlen, 2) + seqlen
@@ -492,7 +470,7 @@ end
 
 
 """
-    n_cigar_op(record::Record, checkCG::Bool = true)
+    n_cigar_op(record::BAMRecord, checkCG::Bool = true)
 
 Return the number of operations in the CIGAR string of `record`.
 
@@ -511,12 +489,12 @@ If you have a record that stores the true cigar in a `CG:B,I` tag, but you still
 want to get the number of operations in the `cigar` field of the BAM record,
 then set `checkCG` to `false`.
 """
-function n_cigar_op(record::Record, checkCG::Bool = true)
+function n_cigar_op(record::BAMRecord, checkCG::Bool = true)
     return cigar_position(record, checkCG)[2]
 end
 
 """
-    cigar(record::Record)::String
+    cigar(record::BAMRecord)::String
 
 Get the CIGAR string of `record`.
 
@@ -537,10 +515,10 @@ record, then you can set checkCG to `false`.
 
 See also `BAM.cigar_rle`.
 """
-function cigar(record::Record, checkCG::Bool = true)::Union{String,Nothing}
+function cigar(record::BAMRecord, checkCG::Bool = true)::Union{String,Missing}
     rle = cigar_rle(record, checkCG)
-    if rle === nothing
-        return nothing
+    if rle === missing
+        return missing
     else
         buf = IOBuffer()
         for (op, len) in zip(rle...)
@@ -551,7 +529,7 @@ function cigar(record::Record, checkCG::Bool = true)::Union{String,Nothing}
 end
 
 """
-    cigar_rle(record::Record, checkCG::Bool = true)::Tuple{Vector{BioAlignments.Operation},Vector{Int}}
+    cigar_rle(record::BAMRecord, checkCG::Bool = true)::Tuple{Vector{BioAlignments.Operation},Vector{Int}}
 
 Get a run-length encoded tuple `(ops, lens)` of the CIGAR string in `record`.
 
@@ -572,10 +550,10 @@ record, then you can set checkCG to `false`.
 
 See also `BAM.cigar`.
 """
-function cigar_rle(record::Record, checkCG::Bool = true)::Union{Tuple{Vector{BioAlignments.Operation},Vector{Int}},Nothing}
+function cigar_rle(record::BAMRecord, checkCG::Bool = true)::Union{Tuple{Vector{BioAlignments.Operation},Vector{Int}},Missing}
     idx, nops = cigar_position(record, checkCG)
     if nops == 0
-        return nothing
+        return missing
     else
         ops, lens = extract_cigar_rle(record.data, idx, nops)
         return ops, lens
@@ -594,8 +572,8 @@ function extract_cigar_rle(data::Vector{UInt8}, offset, n)
     return ops, lens
 end
 
-function cigar_position(record::Record, checkCG::Bool = true)::Tuple{Int, Int}
-    cigaridx, nops = seqname_length(record) + 2, record.flag_nc & 0xFFFF
+function cigar_position(record::BAMRecord, checkCG::Bool = true)::Tuple{Int, Int}
+    cigaridx, nops = seqname_length(record) + 2, record.n_cigar_op
     if !checkCG
         return cigaridx, nops
     end
@@ -625,11 +603,11 @@ function cigar_position(record::Record, checkCG::Bool = true)::Tuple{Int, Int}
 end
 
 """
-    alignment(record::Record)::BioAlignments.Alignment
+    alignment(record::BAMRecord)::BioAlignments.Alignment
 
 Get the alignment of `record`.
 """
-function alignment(record::Record)::BioAlignments.Alignment
+function alignment(record::BAMRecord)::BioAlignments.Alignment
     if !ismapped(record)
         return BioAlignments.Alignment(BioAlignments.AlignmentAnchor[])
     end
@@ -653,11 +631,11 @@ function alignment(record::Record)::BioAlignments.Alignment
 end
 
 """
-    alignlength(record::Record)::Int
+    alignlength(record::BAMRecord)::Int
 
 Get the alignment length of `record`.
 """
-function alignlength(record::Record)::Int
+function alignlength(record::BAMRecord)::Int
     offset = seqname_length(record) + 1
     length::Int = 0
     for i in offset + 1:4:offset + n_cigar_op(record, false) * 4
@@ -671,14 +649,14 @@ function alignlength(record::Record)::Int
 end
 
 """
-    sequence(record::Record)::BioSequences.DNASequence
+    sequence(record::BAMRecord)::BioSequences.DNASequence
 
-Get the segment sequence of `record`. Returns `nothing` if not available.
+Get the segment sequence of `record`. Returns `missing` if not available.
 """
-function sequence(record::Record)::Union{BioSequences.DNASequence, Nothing}
+function sequence(record::BAMRecord)::Union{BioSequences.DNASequence, Missing}
     seqlen = seqlength(record)
     if seqlen == 0
-        return nothing
+        return missing
     else
         data = Vector{UInt64}(undef, cld(seqlen, 16))
         src::Ptr{UInt64} = pointer(record.data, seqname_length(record) + n_cigar_op(record, false) * 4 + 2)
@@ -692,14 +670,14 @@ function sequence(record::Record)::Union{BioSequences.DNASequence, Nothing}
 end
 
 """
-    quality(record::Record)::Vector{UInt8}
+    quality(record::BAMRecord)::Vector{UInt8}
 
-Get the base quality of `record`, or `nothing` if not available.
+Get the base quality of `record`, or `missing` if not available.
 """
-function quality(record::Record)::Union{Vector{UInt8}, Nothing}
+function quality(record::BAMRecord)::Union{Vector{UInt8}, Missing}
     seqlen = seqlength(record)
     if seqlen == 0
-        return nothing
+        return missing
     else
         offset = seqname_length(record) + 1 + n_cigar_op(record, false) * 4 + cld(seqlen, 2)
         return [reinterpret(UInt8, record.data[i+offset]) for i in 1:seqlen]

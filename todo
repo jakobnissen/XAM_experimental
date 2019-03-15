@@ -6,7 +6,7 @@ Remove isfilled() checks from all BAM operations.
 For BAM, all hasX should return a Bool
 Fix hasnextrefname
 RNAME should be able to be read even when read is unmapped (as per specs 1.4.3)
-Methods now return nothing if information is not available.
+Methods now return missing if information is not available.
 An empty BAM record is now a legitimate BAM record
 BAM.seqname_length now returns the true length instead of length + 1
 Implemented get(::Record, tag, default)
@@ -15,6 +15,7 @@ Implemented delete!(::Record, tag)
 Implemented setindex!(::Record, tag, value)
 Deleted AuxValue object
 auxvalues(::Record) now returns a dict
+Fields of BAM object are now 1:1 with BAM file specs
 
 XAM Todo:
 

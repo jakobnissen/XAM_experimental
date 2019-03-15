@@ -20,7 +20,7 @@ mutable struct Reader{T} <: BioCore.IO.AbstractReader
 end
 
 function Base.eltype(::Type{Reader{T}}) where T
-    return Record
+    return BAMRecord
 end
 
 function BioCore.IO.stream(reader::Reader)
@@ -78,7 +78,7 @@ function Base.seekstart(reader::Reader)
     seek(reader.stream, reader.start_offset)
 end
 
-function Base.iterate(reader::Reader, rec=Record())
+function Base.iterate(reader::Reader, rec=BAMRecord())
     if eof(reader)
         return nothing
     end
@@ -102,16 +102,16 @@ function init_bam_reader(input::BGZFStreams.BGZFStream)
     samreader = SAM.Reader(IOBuffer(read(input, textlen)))
 
     # reference sequences
-    refseqnames = String[]
-    refseqlens = Int[]
     n_refs = read(input, Int32)
-    for _ in 1:n_refs
+    refseqnames = Vector{String}(undef, n_refs)
+    refseqlens = Vector{Int}(undef, n_refs)
+    @inbounds for i in 1:n_refs
         namelen = read(input, Int32)
         data = read(input, namelen)
         seqname = unsafe_string(pointer(data))
         seqlen = read(input, Int32)
-        push!(refseqnames, seqname)
-        push!(refseqlens, seqlen)
+        refseqnames[i] = seqname
+        refseqlens[i] = seqlen
     end
 
     voffset = isa(input.io, Pipe) ?

@@ -29,7 +29,7 @@ function BioCore.IO.stream(writer::Writer)
     return writer.stream
 end
 
-function Base.write(writer::Writer, record::Record)
+function Base.write(writer::Writer, record::BAMRecord)
     n = 0
     n += unsafe_write(writer.stream, pointer_from_objref(record), FIXED_FIELDS_BYTES)
     n += unsafe_write(writer.stream, pointer(record.data), data_size(record))
@@ -37,7 +37,9 @@ function Base.write(writer::Writer, record::Record)
 end
 
 function write_header(stream, header, refseqnames, refseqlens)
-    @assert length(refseqnames) == length(refseqlens)
+    if length(refseqnames) != length(refseqlens)
+        error("Lengths of refseq names and lengths must match")
+    end
     n = 0
 
     # magic bytes
