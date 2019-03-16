@@ -1,11 +1,10 @@
 # SAM Record
 # ==========
 
-mutable struct SAMRecord
-    # data and filled range
-    data::Vector{UInt8}
-    filled::UnitRange{Int}
-    # indexes
+const FIXED_FIELD_BYTES = 192
+
+mutable struct SAMRecord <: XAMRecord
+    # Indices
     qname::UnitRange{Int}
     flag::UnitRange{Int}
     rname::UnitRange{Int}
@@ -17,6 +16,9 @@ mutable struct SAMRecord
     tlen::UnitRange{Int}
     seq::UnitRange{Int}
     qual::UnitRange{Int}
+    filled::UnitRange{Int}
+    # data
+    data::Vector{UInt8}
     fields::Vector{UnitRange{Int}}
 end
 
@@ -27,13 +29,14 @@ Create an unfilled SAM record.
 """
 function SAMRecord()
     return SAMRecord(
-        UInt8[], 1:0,
         # qname-mapq
         1:0, 1:0, 1:0, 1:0, 1:0,
         # cigar-seq
         1:0, 1:0, 1:0, 1:0, 1:0,
         # qual and fields
-        1:0, UnitRange{Int}[])
+        1:0, 1:0,
+        UInt8[],
+        UnitRange{Int}[])
 end
 
 """
@@ -48,14 +51,15 @@ function SAMRecord(data::Vector{UInt8})
 end
 
 function Base.convert(::Type{SAMRecord}, data::Vector{UInt8})
-    record = SAMRecord(
-        data, 1:0,
+    return SAMRecord(
         # qname-mapq
         1:0, 1:0, 1:0, 1:0, 1:0,
         # cigar-seq
         1:0, 1:0, 1:0, 1:0, 1:0,
         # qual and fields
-        1:0, UnitRange{Int}[])
+        1:0, 1:0,
+        data,
+        UnitRange{Int}[])
     index!(record)
     return record
 end
@@ -76,25 +80,45 @@ end
 
 function Base.show(io::IO, record::SAMRecord)
     print(io, summary(record), ':')
-    if isfilled(record)
-        println(io)
-        println(io, "    template name: ", hastempname(record) ? tempname(record) : "<missing>")
-        println(io, "             flag: ", flag(record))
-        println(io, "        reference: ", hasrefname(record) ? refname(record) : "<missing>")
-        println(io, "         position: ", hasposition(record) ? position(record) : "<missing>")
-        println(io, "  mapping quality: ", hasmappingquality(record) ? mappingquality(record) : "<missing>")
-        println(io, "            CIGAR: ", hascigar(record) ? cigar(record) : "<missing>")
-        println(io, "   next reference: ", hasnextrefname(record) ? nextrefname(record) : "<missing>")
-        println(io, "    next position: ", hasnextposition(record) ? nextposition(record) : "<missing>")
-        println(io, "  template length: ", hastemplength(record) ? templength(record) : "<missing>")
-        println(io, "         sequence: ", hassequence(record) ? sequence(String, record) : "<missing>")
-        println(io, "     base quality: ", hasquality(record) ? quality(String, record) : "<missing>")
-          print(io, "   auxiliary data:")
-        for field in record.fields
-            print(io, ' ', String(record.data[field]))
-        end
+    println(io)
+    print(io,   "      template name: "); show(io, tempname(record))
+    print(io, "\n               flag: "); show(io, flag(record))
+    print(io, "\n          reference: "); show(io, refname(record))
+    print(io, "\n           position: "); show(io, position(record))
+    print(io, "\n    mapping quality: "); show(io, mappingquality(record))
+    print(io, "\n              CIGAR: "); show(io, cigar(record))
+    print(io, "\n     next reference: "); show(io, nextrefname(record))
+    print(io, "\n      next position: "); show(io, nextposition(record))
+    print(io, "\n    template length: "); show(io, templength(record))
+    # Sequence and base quality
+    LEFT_PADDING = 20
+    width = displaysize()[2] - LEFT_PADDING
+    seq = sequence(record)
+    if seq === missing
+        print(io, "\n           sequence: "); show(io,  seq)
+        print(io, "\n       base quality: "); show(io, missing)
+    elseif length(seq) <= width
+        print(io, "\n           sequence: "); show(io,  seq)
+        print(io, "\n       base quality: "); print(io, quality_string(quality(record)))
     else
-        print(io, " <not filled>")
+        half = div(width, 2) - 1
+        print(io, "\n           sequence: ", seq[1:half], '…', seq[end-half:end])
+        qual = quality(record)
+        print(io, "\n       base quality: ", quality_string(qual[1:half]), '…',
+                  quality_string(qual[end-half:end]))
+    end
+    # Auxiliary fields - don't show if too long
+    print(io, "\n     auxiliary data:")
+    n_aux_bytes = 0
+    for field in record.fields
+        n_aux_bytes += length(field)
+    end
+    if n_aux_bytes > 500
+        print(io, "<", n_aux_bytes, " bytes auxiliary data>")
+    else
+        for field in keys(auxdata(record))
+            print(io, ' ', field, '='); show(record[field])
+        end
     end
 end
 
@@ -104,14 +128,11 @@ function Base.print(io::IO, record::SAMRecord)
 end
 
 function Base.write(io::IO, record::SAMRecord)
-    checkfilled(record)
     return unsafe_write(io, pointer(record.data, first(record.filled)), length(record.filled))
 end
 
 function Base.copy(record::SAMRecord)
     return SAMRecord(
-        copy(record.data),
-        record.filled,
         record.qname,
         record.flag,
         record.rname,
@@ -123,6 +144,8 @@ function Base.copy(record::SAMRecord)
         record.tlen,
         record.seq,
         record.qual,
+        record.filled,
+        copy(record.data),
         copy(record.fields))
 end
 
@@ -133,7 +156,7 @@ end
 Get the bitwise flag of `record`.
 """
 function flag(record::SAMRecord)::UInt16
-    return unsafe_parse_decimal(UInt16, record.data, record.flag)
+    return isempty(record.flag) ? 0x004 : unsafe_parse_decimal(UInt16, record.data, record.flag)
 end
 
 # ================= Boolean functions ===================
@@ -165,15 +188,15 @@ end
 Get the reference sequence name of `record`.
 """
 function refname(record::SAMRecord)
-    checkfilled(record)
-    if ismissing(record, record.rname)
-        missingerror(:refname)
+    if isempty(record.rname)
+        return missing
     end
-    return String(record.data[record.rname])
-end
-
-function hasrefname(record::SAMRecord)
-    return isfilled(record) && !ismissing(record, record.rname)
+    name = record.data[record.rname]
+    if isstar(name)
+        return missing
+    else
+        return String(record.data[record.rname])
+    end
 end
 
 """
@@ -181,17 +204,12 @@ end
 
 Get the 1-based leftmost mapping position of `record`.
 """
-function position(record::SAMRecord)::Int
-    checkfilled(record)
-    pos = unsafe_parse_decimal(Int, record.data, record.pos)
-    if pos == 0
-        missingerror(:position)
+function position(record::SAMRecord)::Union{Int, Missing}
+    if isempty(record.pos)
+        return missing
     end
-    return pos
-end
-
-function hasposition(record::SAMRecord)
-    return isfilled(record) && (length(record.pos) != 1 || record.data[first(record.pos)] != UInt8('0'))
+    pos = unsafe_parse_decimal(Int, record.data, record.pos)
+    return pos == 0 ? missing : pos
 end
 
 """
@@ -203,9 +221,6 @@ function rightposition(record::SAMRecord)
     return position(record) + alignlength(record) - 1
 end
 
-function hasrightposition(record::SAMRecord)
-    return hasposition(record) && hasalignment(record)
-end
 
 """
     isnextmapped(record::SAMRecord)::Bool
@@ -213,7 +228,7 @@ end
 Test if the mate/next read of `record` is mapped.
 """
 function isnextmapped(record::SAMRecord)::Bool
-    return isfilled(record) && (flag(record) & FLAG_MUNMAP == 0)
+    return flag(record) & FLAG_MUNMAP == 0
 end
 
 """
@@ -221,16 +236,18 @@ end
 
 Get the reference name of the mate/next read of `record`.
 """
-function nextrefname(record::SAMRecord)::String
-    checkfilled(record)
-    if ismissing(record, record.rnext)
-        missingerror(:nextrefname)
+function nextrefname(record::SAMRecord)::Union{String, Missing}
+    if isempty(record.rname)
+        return missing
     end
-    return String(record.data[record.rnext])
-end
-
-function hasnextrefname(record::SAMRecord)
-    return isfilled(record) && !ismissing(record, record.rnext)
+    name = record.data[record.rname]
+    if isstar(name)
+        return missing
+    elseif @inbounds sizeof(name) == 1 && name[1] == UInt8('=')
+        return refname(record)
+    else
+        return String(record.data[record.rname])
+    end
 end
 
 """
@@ -238,17 +255,12 @@ end
 
 Get the position of the mate/next read of `record`.
 """
-function nextposition(record::SAMRecord)::Int
-    checkfilled(record)
-    pos = unsafe_parse_decimal(Int, record.data, record.pnext)
-    if pos == 0
-        missingerror(:nextposition)
+function nextposition(record::SAMRecord)::Union{Int, Missing}
+    if isempty(record.pnext)
+        return missing
     end
-    return pos
-end
-
-function hasnextposition(record::SAMRecord)
-    return isfilled(record) && (length(record.pnext) != 1 || record.data[first(record.pnext)] != UInt8('0'))
+    pos = unsafe_parse_decimal(Int, record.data, record.pnext)
+    return pos == 0 ? missing : pos
 end
 
 """
@@ -256,17 +268,12 @@ end
 
 Get the mapping quality of `record`.
 """
-function mappingquality(record::SAMRecord)::UInt8
-    checkfilled(record)
-    qual = unsafe_parse_decimal(UInt8, record.data, record.mapq)
-    if qual == 0xff
-        missingerror(:mappingquality)
+function mappingquality(record::SAMRecord)::Union{UInt8, Missing}
+    if isempty(record.mapq)
+        return missing
     end
-    return qual
-end
-
-function hasmappingquality(record::SAMRecord)
-    return isfilled(record) && unsafe_parse_decimal(UInt8, record.data, record.mapq) != 0xff
+    qual = unsafe_parse_decimal(UInt8, record.data, record.mapq)
+    return qual == 0xff ? missing : qual
 end
 
 """
@@ -274,16 +281,16 @@ end
 
 Get the CIGAR string of `record`.
 """
-function cigar(record::SAMRecord)::String
-    checkfilled(record)
-    if ismissing(record, record.cigar)
-        missingerror(:cigar)
+function cigar(record::SAMRecord)::Union{String, Missing}
+    if isempty(record.cigar)
+        return missing
     end
-    return String(record.data[record.cigar])
-end
-
-function hascigar(record::SAMRecord)
-    return isfilled(record) && !ismissing(record, record.cigar)
+    cig = record.data[record.cigar]
+    if isstar(cig)
+        return missing
+    else
+        return String(record.data[record.cigar])
+    end
 end
 
 """
@@ -297,10 +304,6 @@ function alignment(record::SAMRecord)::BioAlignments.Alignment
     else
         return BioAlignments.Alignment(BioAlignments.AlignmentAnchor[])
     end
-end
-
-function hasalignment(record::SAMRecord)
-    return isfilled(record) && hascigar(record)
 end
 
 """
@@ -334,16 +337,16 @@ end
 
 Get the query template name of `record`.
 """
-function tempname(record::SAMRecord)::String
-    checkfilled(record)
-    if ismissing(record, record.qname)
-        missingerror(:tempname)
+function tempname(record::SAMRecord)::Union{String, Missing}
+    if isempty(record.qname)
+        return missing
     end
-    return String(record.data[record.qname])
-end
-
-function hastempname(record::SAMRecord)
-    return isfilled(record) && !ismissing(record, record.qname)
+    name = record.data[record.qname]
+    if isstar(name)
+        return missing
+    else
+        return String(name)
+    end
 end
 
 """
@@ -351,17 +354,12 @@ end
 
 Get the template length of `record`.
 """
-function templength(record::SAMRecord)::Int
-    checkfilled(record)
-    len = unsafe_parse_decimal(Int, record.data, record.tlen)
-    if len == 0
-        missingerror(:tlen)
+function templength(record::SAMRecord)::Union{Int,Missing}
+    if isempty(record.tlen)
+        return missing
     end
-    return len
-end
-
-function hastemplength(record::SAMRecord)
-    return isfilled(record) && (length(record.tlen) != 1 || record.data[first(record.tlen)] != UInt8('0'))
+    len = unsafe_parse_decimal(Int, record.data, record.tlen)
+    return len == 0 ? missing : len
 end
 
 """
@@ -369,27 +367,27 @@ end
 
 Get the segment sequence of `record`.
 """
-function sequence(record::SAMRecord)::BioSequences.DNASequence
-    checkfilled(record)
-    if ismissing(record, record.seq)
-        missingerror(:sequence)
+function sequence(record::SAMRecord)::Union{BioSequences.DNASequence, Missing}
+    if isempty(record.seq)
+        return missing
     end
-    seqlen = length(record.seq)
-    ret = BioSequences.DNASequence(seqlen)
-    BioSequences.encode_copy!(ret, 1, record.data, first(record.seq), seqlen)
-    return ret
+    seqdata = record.data[record.seq]
+    if isstar(seqdata)
+        return missing
+    else
+        seqlen = length(record.seq)
+        ret = BioSequences.DNASequence(seqlen)
+        BioSequences.encode_copy!(ret, 1, record.data, first(record.seq), seqlen)
+        return ret
+    end
 end
 
-function hassequence(record::SAMRecord)
-    return isfilled(record) && !ismissing(record, record.seq)
-end
 """
     sequence(::Type{String}, record::SAMRecord)::String
 
 Get the segment sequence of `record` as `String`.
 """
 function sequence(::Type{String}, record::SAMRecord)::String
-    checkfilled(record)
     return String(record.data[record.seq])
 end
 
@@ -398,16 +396,11 @@ end
 
 Get the sequence length of `record`.
 """
-function seqlength(record::SAMRecord)::Int
-    checkfilled(record)
-    if ismissing(record, record.seq)
-        missingerror(:seq)
+function seqlength(record::SAMRecord)::Union{Int, Missing}
+    if isempty(record.seq)
+        return missing
     end
     return length(record.seq)
-end
-
-function hasseqlength(record::SAMRecord)
-    return isfilled(record) && !ismissing(record, record.seq)
 end
 
 """
@@ -415,20 +408,19 @@ end
 
 Get the Phred-scaled base quality of `record`.
 """
-function quality(record::SAMRecord)::Vector{UInt8}
-    checkfilled(record)
-    if ismissing(record, record.qual)
-        missingerror(:quality)
+function quality(record::SAMRecord)::Union{Vector{UInt8}, Missing}
+    if isempty(record.qual)
+        return missing
     end
     qual = record.data[record.qual]
-    for i in 1:lastindex(qual)
-        @inbounds qual[i] -= 33
+    if isstar(qual)
+        return missing
+    else
+        for i in 1:lastindex(qual)
+            @inbounds qual[i] -= 33
+        end
+        return qual
     end
-    return qual
-end
-
-function hasquality(record::SAMRecord)
-    return isfilled(record) && !ismissing(record, record.qual)
 end
 
 """
@@ -436,8 +428,10 @@ end
 
 Get the ASCII-encoded base quality of `record`.
 """
-function quality(::Type{String}, record::SAMRecord)::String
-    checkfilled(record)
+function quality(::Type{String}, record::SAMRecord)::Union{String,Missing}
+    if isempty(record.qual)
+        return missing
+    end
     return String(record.data[record.qual])
 end
 
@@ -447,7 +441,6 @@ end
 Get the auxiliary data (optional fields) of `record`.
 """
 function auxdata(record::SAMRecord)::Dict{String,Any}
-    checkfilled(record)
     return Dict(k => record[k] for k in keys(record))
 end
 
@@ -489,7 +482,6 @@ function Base.getindex(record::SAMRecord, tag::AbstractString)
 end
 
 function Base.keys(record::SAMRecord)
-    checkfilled(record)
     return [String(record.data[first(f):first(f)+1]) for f in record.fields]
 end
 
@@ -500,7 +492,6 @@ end
 
 # Bio Methods
 # -----------
-
 function BioCore.isfilled(record::SAMRecord)
     return !isempty(record.filled)
 end
@@ -558,14 +549,7 @@ function initialize!(record::SAMRecord)
     return record
 end
 
-function checkfilled(record::SAMRecord)
-    if !isfilled(record)
-        throw(ArgumentError("unfilled SAM record"))
-    end
-end
-
 function findauxtag(record::SAMRecord, tag::AbstractString)
-    checkfilled(record)
     if sizeof(tag) != 2
         return 0
     end
@@ -614,6 +598,6 @@ function parse_typedarray(data::Vector{UInt8}, range::UnitRange{Int})
     end
 end
 
-function ismissing(record::SAMRecord, range::UnitRange{Int})
-    return length(range) == 1 && record.data[first(range)] == UInt8('*')
+function isstar(x::Vector{UInt8})
+    @inbounds return sizeof(x) == 1 && x[1] == UInt8('*')
 end

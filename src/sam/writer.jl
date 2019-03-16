@@ -37,7 +37,7 @@ function Base.write(writer::Writer, metainfo::MetaInfo)
     return write(writer.stream, metainfo, '\n')
 end
 
-function Base.write(writer::Writer, record::Record)
+function Base.write(writer::Writer, record::SAMRecord)
     checkfilled(record)
     return write(writer.stream, record, '\n')
 end

@@ -8,6 +8,7 @@ import BioCore: BioCore, distance, header, isfilled, seqname, hasseqname, sequen
 import BioSequences
 import BioSymbols
 
+include("common.jl")
 include("sam/sam.jl")
 include("bam/bam.jl")
 

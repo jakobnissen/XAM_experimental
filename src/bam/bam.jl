@@ -9,6 +9,7 @@ import GenomicFeatures: GenomicFeatures, Interval
 import BioSequences
 import BioCore: BioCore, isfilled
 
+include("../common.jl")
 include("bai.jl")
 include("reader.jl")
 include("record.jl")

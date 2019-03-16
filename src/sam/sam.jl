@@ -13,6 +13,7 @@ import BioSequences
 import BufferedStreams
 using Printf: @sprintf
 
+include("../common.jl")
 include("flags.jl")
 include("metainfo.jl")
 include("record.jl")

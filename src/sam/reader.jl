@@ -43,7 +43,7 @@ function BioCore.header(reader::Reader)
 end
 
 function Base.eltype(::Type{Reader})
-    return Record
+    return SAMRecord
 end
 
 # file   = header . body
@@ -210,7 +210,7 @@ eval(
             :metainfo => quote
                 BioCore.ReaderHelper.resize_and_copy!(record.data, data, BioCore.ReaderHelper.upanchor!(stream):p-1)
                 record.filled = (offset+1:p-1) .- offset
-                @assert isfilled(record)
+                #@assert isfilled(record)
                 push!(reader.header.metainfo, record)
                 BioCore.ReaderHelper.ensure_margin!(stream)
                 record = MetaInfo()
@@ -245,7 +245,7 @@ const sam_record_actions = Dict(
     :mark         => :(mark = p))
 eval(
     BioCore.ReaderHelper.generate_index_function(
-        Record,
+        SAMRecord,
         sam_record_machine,
         :(mark = offset = 0),
         sam_record_actions))
