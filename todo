@@ -16,10 +16,14 @@ Implemented setindex!(::Record, tag, value)
 Deleted AuxValue object
 auxvalues(::Record) now returns a dict
 Fields of BAM object are now 1:1 with BAM file specs
+BAM now supports reading hex bytes auxiliary fields (of type H). When written,
+these are automatically converted to UInt8 byte array (type BC).
 
 XAM Todo:
 
 OPTIMIZE LOADAUXTYPE USING TUPLE LOOKUP - FASTER THAN CURRENT CODE?
+OPTIMZE LOADAUXVALUE - un-dispatch it, since the type information can never be inferred.
+Redo convert(type{sam}, bam)
 
 == Find out the dependencies
 

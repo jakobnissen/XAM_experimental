@@ -106,6 +106,53 @@ function Base.read!(reader::Reader, record::BAMRecord)
     return _read!(reader, record)
 end
 
+function Base.convert(::Type{SAM.SAMRecord}, record::BAMRecord)
+    buffer = IOBuffer()
+    start = 1
+    ranges = UnitRange{Int}[]
+    fields = UnitRange{Int}[]
+    # All all fields except quality score
+    for (f, default) in (
+        (tempname, '*'),
+        (flag, 0),
+        (refname, '*'),
+        (position, 0),
+        (mappingquality, 255),
+        (cigar, '*'),
+        (nextrefname, '*'),
+        (nextposition, 0),
+        (templength, 0),
+        (sequence, '*'),
+        )
+        # Special case for nextrefname, which can be a "="
+        if f === nextrefname && record.refid == record.next_refid != -1
+            str = "="
+        else
+            str = f(record)
+            str = ismissing(str) ? default : string(str)
+        end
+        stop = start + write(buffer, str, '\t') - 2
+        push!(ranges, start:stop)
+        start = stop + 2
+    end
+    # Add quality score
+    str = quality(record) .+ UInt8(33)
+    str = ismissing(str) ? '*' : String(str)
+    stop = start + write(buffer, str) - 1
+    push!(ranges, start:stop)
+    # Add the tags
+    aux = AuxDataIterator(record)
+    pos = aux.start
+    while pos <= aux.stop
+        start = stop + 2
+        write(buffer, '\t')
+        bytes, pos = write_to_buffer(buffer, aux, pos)
+        stop = start + bytes - 1
+        push!(fields, start:stop)
+    end
+    return SAM.SAMRecord(ranges..., 1:stop, take!(buffer), fields)
+end
+
 # ============== Accessor functions =====================
 """
     flag(record::BAMRecord)::UInt16

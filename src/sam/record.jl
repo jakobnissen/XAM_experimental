@@ -91,7 +91,7 @@ function Base.show(io::IO, record::SAMRecord)
     print(io, "\n      next position: "); show(io, nextposition(record))
     print(io, "\n    template length: "); show(io, templength(record))
     # Sequence and base quality
-    LEFT_PADDING = 20
+    LEFT_PADDING = 21
     width = displaysize()[2] - LEFT_PADDING
     seq = sequence(record)
     if seq === missing

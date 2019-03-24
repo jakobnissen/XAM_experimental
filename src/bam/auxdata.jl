@@ -1,5 +1,7 @@
 # BAM Auxiliary Data
 # ==================
+# Note: Because all this code is inherently type unstable, using multiple
+# dispatch will result in less efficient code than spamming if/else statements.
 
 struct AuxDataIterator
     start::Int
@@ -12,18 +14,10 @@ function AuxDataIterator(record::BAMRecord)
 end
 
 function Base.iterate(aux::AuxDataIterator, pos=aux.start::Int)
-    data = aux.data
     if pos > aux.stop
         return nothing
     end
-    @label doit
-    t1 = data[pos]
-    t2 = data[pos+1]
-    pos, typ = loadauxtype(data, pos + 2)
-    pos, value = loadauxvalue(data, pos, typ)
-    if t1 == t2 == 0xff
-        @goto doit
-    end
+    t1, t2, value, pos = get_next_auxpair(aux.data, pos)
     return Pair{String,Any}(String([t1, t2]), value), pos
 end
 
@@ -36,7 +30,7 @@ function Base.getindex(record::BAMRecord, tag::AbstractString)
     if pos === nothing
         throw(KeyError(tag))
     end
-    return loadauxvalue(record.data, pos)
+    return load_auxvalue(record.data, pos)
 end
 
 function Base.get(record::BAMRecord, tag::AbstractString, default::Any)
@@ -44,7 +38,7 @@ function Base.get(record::BAMRecord, tag::AbstractString, default::Any)
     if pos === nothing
         return default
     end
-    return loadauxvalue(record.data, pos)
+    return load_auxvalue(record.data, pos)
 end
 
 function Base.haskey(record::BAMRecord, tag::AbstractString)::Bool
@@ -80,7 +74,7 @@ const TYPESTRINGS = Dict{DataType,String}(UInt8=>"C", Vector{UInt8}=>"BC",
                        UInt32=>"I", Vector{UInt32}=>"BI",
                        Int32=>"i", Vector{Int32}=>"Bi",
                        Float32=>"f", Vector{Float32}=>"Bf",
-                       String=>"Z")
+                       String=>"Z", Char=>"A")
 
 function Base.setindex!(record::BAMRecord, value, key::AbstractString)
     data = record.data
@@ -92,7 +86,7 @@ function Base.setindex!(record::BAMRecord, value, key::AbstractString)
     # or else we must delete it, then re-add it.
     pos = findauxtag(record, key)
     if pos !== nothing
-        if isbits(value) && loadauxtype(data, pos + 2)[2] === typeof(value)
+        if isbits(value) && load_auxtype(data, pos + 2) === typeof(value)
             unsafe_store!(Ptr{typeof(value)}(pointer(data, pos+3)), value)
             return value
         else
@@ -101,7 +95,8 @@ function Base.setindex!(record::BAMRecord, value, key::AbstractString)
     end
     # Update size of data array to fit
     index = data_size(record)
-    padding = value isa String ? 1 : value isa Vector ? 4 : 0
+    # Null byte for string, length int32 for vector, char is only 1 byte, not 4
+    padding = value isa String ? 1 : value isa Vector ? 4 : value isa Char ? -3 : 0
     data_increase =  2 + sizeof(tag) + sizeof(value) + padding
     resize!(data, index + data_increase)
     # Add tag
@@ -113,23 +108,64 @@ function Base.setindex!(record::BAMRecord, value, key::AbstractString)
         data[index] = UInt8(char)
         index += 1
     end
-    # Write value itself
-    if value isa String
-        unsafe_copyto!(pointer(data, index), pointer(value), sizeof(value))
-        data[end] = 0x00 # null terminate
-    elseif value isa Vector
-        # Store first Int32 with length, then vector itself
-        unsafe_store!(Ptr{Int32}(pointer(data, index)), length(value))
-        unsafe_copyto!(Ptr{eltype(value)}(pointer(data, index+4)), pointer(value), length(value))
-    else
-        unsafe_store!(Ptr{typeof(value)}(pointer(data, index)), value)
-    end
+    write_value(data, index, value)
     record.block_size += data_increase
     return value
 end
 
+function write_value(data::Vector{UInt8}, index::Int, value::String)
+    unsafe_copyto!(pointer(data, index), pointer(value), sizeof(value))
+    data[end] = 0x00 # null terminate
+end
+
+function write_value(data::Vector{UInt8}, index::Int, value::Vector)
+    # Store first Int32 with length, then vector itself
+    unsafe_store!(Ptr{Int32}(pointer(data, index)), length(value))
+    unsafe_copyto!(Ptr{eltype(value)}(pointer(data, index+4)), pointer(value), length(value))
+end
+
+function write_value(data::Vector{UInt8}, index::Int, value::Char)
+    @inbounds data[index] = UInt8(value)
+end
+
+function write_value(data::Vector{UInt8}, index::Int, value)
+    unsafe_store!(Ptr{typeof(value)}(pointer(data, index)), value)
+end
+
 # Internals
 # ---------
+
+function get_next_auxpair(data::Vector{UInt8}, pos::Int)
+    @label doit
+    t1 = data[pos]
+    t2 = data[pos+1]
+    pos, value = load_auxpair(data, pos)
+    if t1 == t2 == 0xff
+        @goto doit
+    end
+    return t1, t2, value, pos
+end
+
+# This function is used to convert an AUX field to text. Useful for converting
+# BAM record to SAM record.
+function write_to_buffer(buffer::IOBuffer, aux::AuxDataIterator, pos::Int)
+    bytes_written = 0
+    if pos <= aux.stop
+        t1, t2, value, pos = get_next_auxpair(aux.data, pos)
+        bytes_written += write(buffer, t1, t2, UInt8(':'))
+        typetag = value isa Integer ? 'i' : TYPESTRINGS[typeof(value)]
+        bytes_written += write(buffer, typetag, UInt8(':'))
+        if value isa Vector
+            for i in value
+                bytes_written += print(buffer, i, UInt8(','))
+            end
+        else
+            bytes_written += print(buffer, value)
+        end
+    end
+    return bytes_written, pos
+end
+
 function findauxtag(record::BAMRecord, tag::AbstractString)
     if sizeof(tag) != 2
         throw(ArgumentError("tag length must be 2"))
@@ -147,8 +183,7 @@ function findauxtag(data::Vector{UInt8}, start::Int, stop::Int, t1::UInt8, t2::U
     return pos > stop ? nothing : pos
 end
 
-# Returns (position after tag, type of value)
-function loadauxtype(data::Vector{UInt8}, p::Int)
+function load_auxtype(data::Vector{UInt8}, p::Int)
     function auxtype(b)
         return (
             b == UInt8('A') ? Char  :
@@ -166,38 +201,56 @@ function loadauxtype(data::Vector{UInt8}, p::Int)
     if t == UInt8('B')
         return p + 2, Vector{auxtype(data[p+1])}
     else
-        return p + 1, auxtype(t)
+        return auxtype(t)
     end
 end
 
-function loadauxvalue(data::Vector{UInt8}, pos::Int)
-    pos, T = loadauxtype(data, pos + 2)
-    _, val = loadauxvalue(data, pos, T)
-    return val
+function load_auxpair(data::Vector{UInt8}, p)
+    p += 2
+    t = data[p]
+    t2 = data[p+1]
+    p = t == UInt8('B') ? p+2 : p+1
+    if t == UInt8('A')
+        return p + sizeof(Char), unsafe_load(Ptr{Char}(pointer(data, p)))
+    elseif t == UInt8('C')
+        return p + sizeof(UInt8), data[p]
+    elseif t == UInt8('c')
+        return p + sizeof(Int8), reinterpret(Int8, data[p])
+    elseif t == UInt8('S')
+        return p + sizeof(UInt16), unsafe_load(Ptr{UInt16}(pointer(data, p)))
+    elseif t == UInt8('s')
+        return p + sizeof(Int16), unsafe_load(Ptr{Int16}(pointer(data, p)))
+    elseif t == UInt8('I')
+        return p + sizeof(UInt32), unsafe_load(Ptr{UInt32}(pointer(data, p)))
+    elseif t == UInt8('i')
+        return p + sizeof(Int32), unsafe_load(Ptr{Int32}(pointer(data, p)))
+    elseif t == UInt8('f')
+        return p + sizeof(Float32), unsafe_load(Ptr{Float32}(pointer(data, p)))
+    elseif t == UInt8('Z') || t == UInt8('H')
+        str = unsafe_string(pointer(data, p))
+        p += sizeof(str) + 1
+        return t == UInt8('Z') ? (p, str) : (p, hex2bytes(str))
+    elseif t == UInt8('B')
+        eltype = t2 == UInt8('A') ? Char  :
+                 t2 == UInt8('c') ? Int8  :
+                 t2 == UInt8('C') ? UInt8 :
+                 t2 == UInt8('s') ? Int16 :
+                 t2 == UInt8('S') ? UInt16 :
+                 t2 == UInt8('i') ? Int32 :
+                 t2 == UInt8('I') ? UInt32 :
+                 t2 == UInt8('f') ? Float32 :
+                 error("invalid type tag: '$(Char(t2))'")
+         n = unsafe_load(Ptr{Int32}(pointer(data, p)))
+         vector = Vector{eltype}(undef, n)
+         unsafe_copyto!(pointer(vector), Ptr{eltype}(pointer(data, p)), n)
+         return p + n * sizeof(T) + 4, vector
+    else
+        throw(ArgumentError("invalid type tag: '$(Char(t))'"))
+    end
 end
 
-function loadauxvalue(data::Vector{UInt8}, p::Int, ::Type{T}) where T
-    return p + sizeof(T), unsafe_load(Ptr{T}(pointer(data, p)))
-end
-
-function loadauxvalue(data::Vector{UInt8}, p::Int, ::Type{Char})
-    return p + 1, Char(unsafe_load(pointer(data, p)))
-end
-
-function loadauxvalue(data::Vector{UInt8}, p::Int, ::Type{Vector{T}}) where T
-    n = unsafe_load(Ptr{Int32}(pointer(data, p)))
-    p += 4
-    xs = Vector{T}(undef, n)
-    unsafe_copyto!(pointer(xs), Ptr{T}(pointer(data, p)), n)
-    return p + n * sizeof(T), xs
-end
-
-function loadauxvalue(data::Vector{UInt8}, p::Int, ::Type{String})
-    dataptr = pointer(data, p)
-    endptr = ccall(:memchr, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t),
-                   dataptr, '\0', length(data) - p + 1)
-    q::Int = p + (endptr - dataptr) - 1
-    return q + 2, String(data[p:q])
+function load_auxvalue(data::Vector{UInt8}, p)
+    return load_auxpair(data, p)[2]
 end
 
 const TYPESIZES = let TYPESIZES = fill(Int8(0), 256)
@@ -218,7 +271,7 @@ end
 # Find next starting position of tag after the tag at p.
 # (data[p], data[p+1]) is supposed to be a current tag.
 function next_tag_position(data::Vector{UInt8}, p::Int)::Int
-    typ = data[p+2]
+    @inbounds typ = data[p+2]
     @inbounds size = TYPESIZES[typ]
     p += 3
     if size == 0
@@ -226,12 +279,12 @@ function next_tag_position(data::Vector{UInt8}, p::Int)::Int
     elseif size > 0
         p += size
     elseif size == -2 # NULL-terminalted string of hex
-        while data[p] != 0x00
+        @inbounds while data[p] != 0x00
             p += 1
         end
         p += 1
     else # Array
-        eltyp = data[p]
+        @inbounds eltyp = data[p]
         @inbounds elsize = TYPESIZES[eltyp]
         if elsize < 1
             error("invalid type tag: '$(Char(eltyp))'")
@@ -245,7 +298,7 @@ end
 
 # Remove the tag from position. Unsafe (must be present.)
 function pop_pos!(record::BAMRecord, pos::Int)
-    val = loadauxvalue(record.data, pos)
+    val = load_auxvalue(record.data, pos)
     nextpos = next_tag_position(record.data, pos)
     datasize = data_size(record)
     # If the tag was not the last, we shift the data leftward
