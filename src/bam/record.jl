@@ -106,51 +106,124 @@ function Base.read!(reader::Reader, record::BAMRecord)
     return _read!(reader, record)
 end
 
-function Base.convert(::Type{SAM.SAMRecord}, record::BAMRecord)
-    buffer = IOBuffer()
-    start = 1
-    ranges = UnitRange{Int}[]
-    fields = UnitRange{Int}[]
-    # All all fields except quality score
-    for (f, default) in (
-        (tempname, '*'),
-        (flag, 0),
-        (refname, '*'),
-        (position, 0),
-        (mappingquality, 255),
-        (cigar, '*'),
-        (nextrefname, '*'),
-        (nextposition, 0),
-        (templength, 0),
-        (sequence, '*'),
-        )
-        # Special case for nextrefname, which can be a "="
-        if f === nextrefname && record.refid == record.next_refid != -1
-            str = "="
-        else
-            str = f(record)
-            str = ismissing(str) ? default : string(str)
+const NUMBERARR = Vector{UInt8}(undef, 32)
+const DNALETTERS = Tuple([UInt8(i) for i in "=ACMGRSVTWYHKDBN"])
+
+function write_int(io::IO, x::Integer)
+    uint = unsigned(abs(x))
+    neg = x < 0
+    len = neg + ndigits(x)
+    i = len
+    while i > neg
+        @inbounds NUMBERARR[i] = 48+rem(uint,10)
+        uint = oftype(uint,div(uint,10))
+        i -= 1
+    end
+    if neg; @inbounds NUMBERARR[1]=0x2d; end
+    unsafe_write(io, pointer(NUMBERARR), len)
+end
+
+function write_to_buffer(buffer::IO, record::BAM.BAMRecord)
+    data = record.data
+
+    # Template name
+    len = BAM.seqname_length(record)
+    if len == 0
+        write(buffer, UInt8('*'))
+    else
+        unsafe_write(buffer, pointer(data), len)
+    end
+    write(buffer, UInt8('\t'))
+
+    # Flag
+    write_int(buffer, record.flag)
+    write(buffer, UInt8('\t'))
+
+    # Reference name
+    rn = BAM.refname(record)
+    if ismissing(rn)
+        write(buffer, UInt8('*'))
+    else
+        write(buffer, rn)
+    end
+    write(buffer, UInt8('\t'))
+
+    # Pos, mapq
+    write_int(buffer, record.pos + 1)
+    write(buffer, UInt8('\t'))
+    write_int(buffer, record.mapq)
+    write(buffer, UInt8('\t'))
+
+    # Cigar
+    idx, nops = BAM.cigar_position(record, true)
+    for i in idx:4:idx + (nops - 1) * 4
+        x = unsafe_load(Ptr{UInt32}(pointer(data, i)))
+        op = BioAlignments.Operation(x & 0x0F)
+        write_int(buffer, x >>> 4)
+        write(buffer, UInt8(convert(Char, op)))
+    end
+    write(buffer, UInt8('\t'))
+
+    # Next reference
+    if record.next_refid == -1
+        write(buffer, UInt8('*'))
+    elseif record.next_refid == record.refid
+        write(buffer, UInt8('='))
+    else
+        nextref = BAM.nextrefname(record)
+        unsafe_write(buffer, pointer(data), len)
+    end
+    write(buffer, UInt8('\t'))
+
+    # Next position, TLEN
+    write_int(buffer, record.next_pos + 1)
+    write(buffer, UInt8('\t'))
+    write_int(buffer, record.tlen)
+    write(buffer, UInt8('\t'))
+
+    # Sequence + qual
+    if record.l_seq == 0
+        write(buffer, [UInt8('*'), UInt8('\t'), UInt8('*')])
+    else
+        seqbuf = Vector{UInt8}(undef, record.l_seq)
+        start = BAM.seqname_length(record) + BAM.n_cigar_op(record, false) * 4 + 2
+        @inbounds for i in 1:record.l_seq
+            pos = start + ((i-1) >>> 1)
+            code = (record.data[pos] >>> (4*isodd(i))) & 0x0f
+            seqbuf[i] = DNALETTERS[code + 1]
         end
-        stop = start + write(buffer, str, '\t') - 2
-        push!(ranges, start:stop)
-        start = stop + 2
+        write(buffer, seqbuf, UInt8('\t'))
+        start = start+((record.l_seq+1) >>> 1)
+        @inbounds for i in 1:record.l_seq
+            seqbuf[i] = data[i+start-1] + UInt8(33)
+        end
+        write(buffer, seqbuf)
     end
-    # Add quality score
-    str = quality(record) .+ UInt8(33)
-    str = ismissing(str) ? '*' : String(str)
-    stop = start + write(buffer, str) - 1
-    push!(ranges, start:stop)
-    # Add the tags
-    aux = AuxDataIterator(record)
-    pos = aux.start
-    while pos <= aux.stop
-        start = stop + 2
+
+    # Auxiliary data
+    auxiter = BAM.AuxDataIterator(record)
+    pos = auxiter.start
+    while pos <= auxiter.stop
         write(buffer, '\t')
-        bytes, pos = write_to_buffer(buffer, aux, pos)
-        stop = start + bytes - 1
-        push!(fields, start:stop)
+        pos = BAM.unsafe_write_to_buffer(buffer, data, pos)
     end
-    return SAM.SAMRecord(ranges..., 1:stop, take!(buffer), fields)
+    return buffer
+end
+
+function Base.convert(::Type{Vector{UInt8}}, record::BAMRecord)
+    buffer = IOBuffer(sizehint=1024)
+    write_to_buffer(buffer, record)
+    return take!(buffer)
+end
+
+function Base.convert(::Type{String}, record::BAMRecord)
+    bytes = convert(Vector{UInt8}, record)
+    return String(bytes)
+end
+
+function Base.convert(::Type{SAM.SAMRecord}, record::BAMRecord)
+    bytes = convert(Vector{UInt8}, record)
+    return SAM.SAMRecord(bytes)
 end
 
 # ============== Accessor functions =====================

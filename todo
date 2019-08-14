@@ -1,5 +1,4 @@
 
-
 XAM Done:
 Remove hasflag (mandatory both in SAM and BAM)
 Remove isfilled() checks from all BAM operations.
@@ -18,12 +17,11 @@ auxvalues(::Record) now returns a dict
 Fields of BAM object are now 1:1 with BAM file specs
 BAM now supports reading hex bytes auxiliary fields (of type H). When written,
 these are automatically converted to UInt8 byte array (type BC).
+SAM no longer displays next_ref as =, but as real name
+Can now convert a BAMRecord to a SAMRecord
+Fixed bug in extracting auxdata of type Vector from SAM records
 
 XAM Todo:
-
-OPTIMIZE LOADAUXTYPE USING TUPLE LOOKUP - FASTER THAN CURRENT CODE?
-OPTIMZE LOADAUXVALUE - un-dispatch it, since the type information can never be inferred.
-Redo convert(type{sam}, bam)
 
 == Find out the dependencies
 
@@ -31,13 +29,9 @@ Redo convert(type{sam}, bam)
 
 === Change SAM interface to follow the BAM one
 
-=== Make display of SAM and BAM records identical
-	- Sam should not display = in next_reference, but same name
-
 === Add an interface for creating SAM and BAM headers more easily
 	- update_header(header, [segments])
 	- create_header(segments)
-
 
 	New interfaces:
 		S Perhaps make an interface to add SQ headers from seq of records
@@ -50,18 +44,5 @@ Redo convert(type{sam}, bam)
 		Also, no newline in comments. No checks in general for bad headers!
 		function record/isnextmapped(record::Record)::Bool: FLAG_MUNMAP should be SAM.FLAG_MUNMAP, has no tests
 
-	Optimizations:
-		Next_tag_position can be made slightly more efficient (lookup rather than branches) (small gains, too)
-
-	Misc changes
-		S The different functions checking BAM flags are inconsistently implemented. Redo them.
-		S SAM & BAM: hasflag(record) is redundant with isfilled(record)
-
 		metainfo/findkey and record/findkey and aux/findkey should return nothing rather than 0 when no key
-		BAM reader: Add check that the indices are not longer than number of refs
-
-hasrefid returns isfilled, not if it has ref id
-hasrefname same
-hasposition returns same BUT not hasrightposition
-BUT refname DOES check whether it has refname, meaning you can have hasrefname() true, yet error on refname()
-same dilemma with hasnextrefname/nextrefname
+		BAM writer: Add check that the indices are not longer than number of refs

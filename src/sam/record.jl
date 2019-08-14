@@ -51,7 +51,7 @@ function SAMRecord(data::Vector{UInt8})
 end
 
 function Base.convert(::Type{SAMRecord}, data::Vector{UInt8})
-    return SAMRecord(
+    record = SAMRecord(
         # qname-mapq
         1:0, 1:0, 1:0, 1:0, 1:0,
         # cigar-seq
@@ -578,7 +578,7 @@ end
 function parse_typedarray(data::Vector{UInt8}, range::UnitRange{Int})
     # format: [cCsSiIf](,[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?)+
     t = data[first(range)]
-    xs = split(String(data[first(range)+2:last(range)]))
+    xs = split(String(data[first(range)+2:last(range)]), ',')
     if t == UInt8('c')
         return [parse(Int8, x) for x in xs]
     elseif t == UInt8('C')

@@ -2,6 +2,7 @@
 # ==================
 # Note: Because all this code is inherently type unstable, using multiple
 # dispatch will result in less efficient code than spamming if/else statements.
+# Therefore the code here is distinctly un-Julian.
 
 struct AuxDataIterator
     start::Int
@@ -17,8 +18,8 @@ function Base.iterate(aux::AuxDataIterator, pos=aux.start::Int)
     if pos > aux.stop
         return nothing
     end
-    t1, t2, value, pos = get_next_auxpair(aux.data, pos)
-    return Pair{String,Any}(String([t1, t2]), value), pos
+    tag1, tag2, type1, type2, value, pos = get_next_auxpair(aux.data, pos)
+    return Pair{String,Any}(String([tag1, tag2]), value), pos
 end
 
 function auxdata(record::BAMRecord)::Dict{String,Any}
@@ -30,7 +31,7 @@ function Base.getindex(record::BAMRecord, tag::AbstractString)
     if pos === nothing
         throw(KeyError(tag))
     end
-    return load_auxvalue(record.data, pos)
+    return load_auxpair(record.data, pos)[4]
 end
 
 function Base.get(record::BAMRecord, tag::AbstractString, default::Any)
@@ -38,7 +39,7 @@ function Base.get(record::BAMRecord, tag::AbstractString, default::Any)
     if pos === nothing
         return default
     end
-    return load_auxvalue(record.data, pos)
+    return load_auxpair(record.data, pos)[4]
 end
 
 function Base.haskey(record::BAMRecord, tag::AbstractString)::Bool
@@ -86,7 +87,7 @@ function Base.setindex!(record::BAMRecord, value, key::AbstractString)
     # or else we must delete it, then re-add it.
     pos = findauxtag(record, key)
     if pos !== nothing
-        if isbits(value) && load_auxtype(data, pos + 2) === typeof(value)
+        if isbits(value) && load_aux_bitstype(data, pos + 2) === typeof(value)
             unsafe_store!(Ptr{typeof(value)}(pointer(data, pos+3)), value)
             return value
         else
@@ -134,36 +135,52 @@ end
 
 # Internals
 # ---------
-
-function get_next_auxpair(data::Vector{UInt8}, pos::Int)
-    @label doit
-    t1 = data[pos]
-    t2 = data[pos+1]
-    pos, value = load_auxpair(data, pos)
-    if t1 == t2 == 0xff
-        @goto doit
-    end
-    return t1, t2, value, pos
+function get_next_auxpair(data::Vector{UInt8}, pos::Int)::Tuple{UInt8, UInt8, UInt8, UInt8, Any, Int}
+    @inbounds tag1 = data[pos]
+    @inbounds tag2 = data[pos+1]
+    pos, type1, type2, value = load_auxpair(data, pos)
+    return tag1, tag2, type1, type2, value, pos
 end
 
-# This function is used to convert an AUX field to text. Useful for converting
-# BAM record to SAM record.
-function write_to_buffer(buffer::IOBuffer, aux::AuxDataIterator, pos::Int)
-    bytes_written = 0
-    if pos <= aux.stop
-        t1, t2, value, pos = get_next_auxpair(aux.data, pos)
-        bytes_written += write(buffer, t1, t2, UInt8(':'))
-        typetag = value isa Integer ? 'i' : TYPESTRINGS[typeof(value)]
-        bytes_written += write(buffer, typetag, UInt8(':'))
-        if value isa Vector
-            for i in value
-                bytes_written += print(buffer, i, UInt8(','))
-            end
-        else
-            bytes_written += print(buffer, value)
+function unsafe_write_to_buffer(buffer::IOBuffer, data::Vector{UInt8}, pos::Int)
+    tag1, tag2, type1, type2, value, pos = get_next_auxpair(data, pos)
+    write(buffer, tag1, tag2, UInt8(':'))
+    if type1 == UInt8('C')
+        write(buffer, UInt8('i'), UInt8(':'))
+        write_int(buffer, value::UInt8)
+    elseif type1 == UInt8('c')
+        write(buffer, UInt8('i'), UInt8(':'))
+        write_int(buffer, value::Int8)
+    elseif type1 == UInt8('A')
+        write(buffer, UInt8('i'), UInt8(':'))
+        print(buffer, value::Char)
+    elseif type1 == UInt8('S')
+        write(buffer, UInt8('i'), UInt8(':'))
+        write_int(buffer, value::UInt16)
+    elseif type1 == UInt8('s')
+        write(buffer, UInt8('i'), UInt8(':'))
+        write_int(buffer, value::Int16)
+    elseif type1 == UInt8('I')
+        write(buffer, UInt8('i'), UInt8(':'))
+        write_int(buffer, value::UInt32)
+    elseif type1 == UInt8('i')
+        write(buffer, UInt8('i'), UInt8(':'))
+        write_int(buffer, value::Int32)
+    elseif type1 == UInt8('f')
+        write(buffer, type1, UInt8(':'))
+        print(buffer, value::Float32)
+    elseif type1 == UInt8('Z')
+        write(buffer, type1, UInt8(':'))
+        print(buffer, value::String)
+    elseif type1 == UInt8('B')
+        write(buffer, type1, UInt8(':'), type2)
+        elt = eltype(value::Vector)
+        @inbounds for i in 1:length(value::Vector)
+            write(buffer, UInt8(','))
+            print(buffer, value[i]::elt)
         end
     end
-    return bytes_written, pos
+    return pos
 end
 
 function findauxtag(record::BAMRecord, tag::AbstractString)
@@ -183,74 +200,56 @@ function findauxtag(data::Vector{UInt8}, start::Int, stop::Int, t1::UInt8, t2::U
     return pos > stop ? nothing : pos
 end
 
-function load_auxtype(data::Vector{UInt8}, p::Int)
-    function auxtype(b)
-        return (
-            b == UInt8('A') ? Char  :
-            b == UInt8('c') ? Int8  :
-            b == UInt8('C') ? UInt8 :
-            b == UInt8('s') ? Int16 :
-            b == UInt8('S') ? UInt16 :
-            b == UInt8('i') ? Int32 :
-            b == UInt8('I') ? UInt32 :
-            b == UInt8('f') ? Float32 :
-            b == UInt8('Z') ? String :
-            error("invalid type tag: '$(Char(b))'"))
-    end
-    t = data[p]
-    if t == UInt8('B')
-        return p + 2, Vector{auxtype(data[p+1])}
-    else
-        return auxtype(t)
-    end
+function load_aux_bitstype(data::Vector{UInt8}, p::Int)
+    b = data[p]
+    return b == UInt8('A') ? Char  :
+    b == UInt8('c') ? Int8  :
+    b == UInt8('C') ? UInt8 :
+    b == UInt8('s') ? Int16 :
+    b == UInt8('S') ? UInt16 :
+    b == UInt8('i') ? Int32 :
+    b == UInt8('I') ? UInt32 :
+    b == UInt8('f') ? Float32 :
+    throw(ValueError("invalid type tag: '$(Char(b))'"))
 end
 
-function load_auxpair(data::Vector{UInt8}, p)
+function load_auxpair(data::Vector{UInt8}, p)::Tuple{Int, UInt8, UInt8, Any}
     p += 2
-    t = data[p]
-    t2 = data[p+1]
-    p = t == UInt8('B') ? p+2 : p+1
-    if t == UInt8('A')
-        return p + sizeof(Char), unsafe_load(Ptr{Char}(pointer(data, p)))
-    elseif t == UInt8('C')
-        return p + sizeof(UInt8), data[p]
-    elseif t == UInt8('c')
-        return p + sizeof(Int8), reinterpret(Int8, data[p])
-    elseif t == UInt8('S')
-        return p + sizeof(UInt16), unsafe_load(Ptr{UInt16}(pointer(data, p)))
-    elseif t == UInt8('s')
-        return p + sizeof(Int16), unsafe_load(Ptr{Int16}(pointer(data, p)))
-    elseif t == UInt8('I')
-        return p + sizeof(UInt32), unsafe_load(Ptr{UInt32}(pointer(data, p)))
-    elseif t == UInt8('i')
-        return p + sizeof(Int32), unsafe_load(Ptr{Int32}(pointer(data, p)))
-    elseif t == UInt8('f')
-        return p + sizeof(Float32), unsafe_load(Ptr{Float32}(pointer(data, p)))
-    elseif t == UInt8('Z') || t == UInt8('H')
+    @inbounds type1 = data[p]
+    @inbounds type2 = data[p+1]
+    p += 1
+    if type1 == UInt8('A')
+        return p + 1, Char(type2)
+    elseif type1 == UInt8('C')
+        return p + sizeof(UInt8), type1, type2, type2
+    elseif type1 == UInt8('c')
+        return p + sizeof(Int8), type1, type2, reinterpret(Int8, type2)
+    elseif type1 == UInt8('S')
+        return p + sizeof(UInt16), type1, type2, unsafe_load(Ptr{UInt16}(pointer(data, p)))
+    elseif type1 == UInt8('s')
+        return p + sizeof(Int16), type1, type2, unsafe_load(Ptr{Int16}(pointer(data, p)))
+    elseif type1 == UInt8('I')
+        return p + sizeof(UInt32), type1, type2, unsafe_load(Ptr{UInt32}(pointer(data, p)))
+    elseif type1 == UInt8('i')
+        return p + sizeof(Int32), type1, type2, unsafe_load(Ptr{Int32}(pointer(data, p)))
+    elseif type1 == UInt8('f')
+        return p + sizeof(Float32), type1, type2, unsafe_load(Ptr{Float32}(pointer(data, p)))
+    elseif type1 == UInt8('Z')
         str = unsafe_string(pointer(data, p))
-        p += sizeof(str) + 1
-        return t == UInt8('Z') ? (p, str) : (p, hex2bytes(str))
-    elseif t == UInt8('B')
-        eltype = t2 == UInt8('A') ? Char  :
-                 t2 == UInt8('c') ? Int8  :
-                 t2 == UInt8('C') ? UInt8 :
-                 t2 == UInt8('s') ? Int16 :
-                 t2 == UInt8('S') ? UInt16 :
-                 t2 == UInt8('i') ? Int32 :
-                 t2 == UInt8('I') ? UInt32 :
-                 t2 == UInt8('f') ? Float32 :
-                 error("invalid type tag: '$(Char(t2))'")
-         n = unsafe_load(Ptr{Int32}(pointer(data, p)))
-         vector = Vector{eltype}(undef, n)
-         unsafe_copyto!(pointer(vector), Ptr{eltype}(pointer(data, p)), n)
-         return p + n * sizeof(T) + 4, vector
+        return p + sizeof(str) + 1, type1, type2, str
+    elseif type1 == UInt8('H')
+        str = unsafe_string(pointer(data, p))
+        return p + sizeof(str) + 1, type1, type2, hex2bytes(str)
+    elseif type1 == UInt8('B')
+        eltype = load_aux_bitstype(data, p)
+        p += 1
+        n = unsafe_load(Ptr{Int32}(pointer(data, p)))
+        vector = Vector{eltype}(undef, n)
+        unsafe_copyto!(pointer(vector), Ptr{eltype}(pointer(data, p)), n)
+        return p + n * sizeof(eltype) + 4, type1, type2, vector
     else
         throw(ArgumentError("invalid type tag: '$(Char(t))'"))
     end
-end
-
-function load_auxvalue(data::Vector{UInt8}, p)
-    return load_auxpair(data, p)[2]
 end
 
 const TYPESIZES = let TYPESIZES = fill(Int8(0), 256)
@@ -278,7 +277,7 @@ function next_tag_position(data::Vector{UInt8}, p::Int)::Int
         error("invalid type tag: '$(Char(typ))'")
     elseif size > 0
         p += size
-    elseif size == -2 # NULL-terminalted string of hex
+    elseif size == -2 # NULL-terminalted string or null terminated hex
         @inbounds while data[p] != 0x00
             p += 1
         end
@@ -298,8 +297,7 @@ end
 
 # Remove the tag from position. Unsafe (must be present.)
 function pop_pos!(record::BAMRecord, pos::Int)
-    val = load_auxvalue(record.data, pos)
-    nextpos = next_tag_position(record.data, pos)
+    nextpos, type1, type2, val = load_auxpair(record.data, pos)
     datasize = data_size(record)
     # If the tag was not the last, we shift the data leftward
     if nextpos <= datasize
